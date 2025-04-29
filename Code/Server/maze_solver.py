@@ -57,11 +57,18 @@ class MazeSolver:
         self.last_positions = deque(maxlen=8)
         
         # Servo scanning parameters
-        self.scan_angles = [0, 90, 180]  # Servo angles to scan (left, front, right)
-        self.ANG_LEFT   = 0
-        self.ANG_FRONT  = 90
-        self.ANG_RIGHT  = 180
-        self.scan_results = {}  # Store scan results
+        # self.scan_angles = [0, 90, 180]  # Old angles
+        self.SCAN_ANGLES = [15, 45, 75, 90, 105, 135, 165] # New angles (7 points)
+        self.SERVO_MOVE_TIME = 0.15 # Reduced pause time for more scans
+        # Keep old angle names for reference in logic if needed, though direct angles used now
+        self.ANG_LEFT_FAR = 15
+        self.ANG_LEFT_MID = 45
+        self.ANG_LEFT_NEAR = 75
+        self.ANG_FRONT = 90
+        self.ANG_RIGHT_NEAR = 105
+        self.ANG_RIGHT_MID = 135
+        self.ANG_RIGHT_FAR = 165
+        self.scan_results = {}  # Store scan results {angle: distance}
         self.observations = []
         
         # Wall detection threshold - ADJUSTED
@@ -78,120 +85,160 @@ class MazeSolver:
     
     def median_distance(self):
         """Get median distance reading, ignoring zeros"""
-        samples = [d for d in (ultrasonic.get_distance() for _ in range(5)) if d]
+        samples = [d for d in (ultrasonic.get_distance() for _ in range(5)) if d > 0] # Ignore 0 explicitly
         if not samples:
-            return 0  # treat as blocked
+            return 1  # Treat as blocked (return a small non-zero number)
         samples.sort()
         return samples[len(samples)//2]
         
     def scan_environment(self):
-        """Scan the environment using the servo-mounted ultrasonic sensor"""
+        """Scan the environment using the servo-mounted ultrasonic sensor across defined angles."""
         self.scan_results = {}  # Clear previous results
-        
+
         if self.simulation_mode:
-            # In simulation mode, generate fake scan results
+            # In simulation mode, generate fake scan results matching new angles
             self.scan_results = {
-                self.ANG_LEFT: 50,
-                self.ANG_FRONT: 30,
-                self.ANG_RIGHT: 40
+                15: 50, 45: 60, 75: 70, # Left side
+                90: 25, # Front (blocked)
+                105: 70, 135: 60, 165: 50 # Right side
             }
+            print("Simulated Scan:", self.scan_results)
             time.sleep(0.5)  # Simulate scan time
             return self.scan_results
-            
-        # Move servo and take measurements at each angle
-        SERVO_MOVE_TIME = 0.25
-        
-        # Use defined angles for consistency
-        angles_to_scan = [self.ANG_LEFT, self.ANG_FRONT, self.ANG_RIGHT]
-        for angle in angles_to_scan:
-            # Move servo to scan angle
+
+        # Ensure servo starts at a known position (e.g., first angle)
+        servo.set_servo_pwm('0', self.SCAN_ANGLES[0])
+        time.sleep(0.3) # Allow time to reach start angle
+
+        # Gradually move servo and take measurements
+        for angle in self.SCAN_ANGLES:
             servo.set_servo_pwm('0', angle)
-            time.sleep(SERVO_MOVE_TIME)  # Wait for servo to move
-            
+            time.sleep(self.SERVO_MOVE_TIME)  # Wait for servo to settle
+
             # Get median distance
-            self.scan_results[angle] = self.median_distance()
-            print(f"{angle}: {self.scan_results[angle]}")
-        
-        # Reset servo to center position
-        servo.set_servo_pwm('0', self.ANG_FRONT) # Reset to front
+            distance = self.median_distance()
+            self.scan_results[angle] = distance
+            # print(f"Scan Angle {angle}: {distance:.1f} cm") # Optional debug print
+
+        # Reset servo to center position after scan
+        servo.set_servo_pwm('0', self.ANG_FRONT) # Reset to front (90)
+        time.sleep(0.2)
+        # print("Scan Results:", {a: f"{d:.1f}" for a, d in self.scan_results.items()}) # Optional summary print
         return self.scan_results
     
     def get_direction(self, scan):
-        """Decide where to go next given the latest scan."""
-        fwd   = scan.get(self.ANG_FRONT, 0)
-        left  = scan.get(self.ANG_LEFT, 0)
-        right = scan.get(self.ANG_RIGHT, 0)
-
-        # 1.  If the road ahead is comfortably clear, prefer it.
-        if fwd > self.FRONT_CLEAR_CM:
+        """Decide where to go next based on multi-point scan results."""
+        # Check front first
+        fwd_dist = scan.get(self.ANG_FRONT, 0)
+        if fwd_dist > self.FRONT_CLEAR_CM:
             return Dir.STRAIGHT
 
-        # 2.  Otherwise pick the wider side corridor.
-        #     (We only need room to *start* the turn, so SIDE_CLEAR_CM.)
-        if left > self.SIDE_CLEAR_CM or right > self.SIDE_CLEAR_CM:
-            return Dir.LEFT if left >= right else Dir.RIGHT
+        # Get max distances for left and right sectors
+        left_readings = [scan.get(a, 0) for a in self.SCAN_ANGLES if a < self.ANG_FRONT]
+        right_readings = [scan.get(a, 0) for a in self.SCAN_ANGLES if a > self.ANG_FRONT]
 
-        # 3.  No side looks inviting → bail out and backtrack.
+        max_left = max(left_readings) if left_readings else 0
+        max_right = max(right_readings) if right_readings else 0
+
+        # Check if either side is clear enough
+        left_clear = max_left > self.SIDE_CLEAR_CM
+        right_clear = max_right > self.SIDE_CLEAR_CM
+
+        if left_clear or right_clear:
+            # Prefer the side with more clearance
+            if max_left >= max_right:
+                return Dir.LEFT
+            else:
+                return Dir.RIGHT
+
+        # If neither front nor sides are clear, go back
         return Dir.BACK
     
     def update_maze_map(self):
-        """Update the maze map based on the current position and scan results"""
+        """Update the maze map based on the current position and multi-point scan results."""
         x, y = self.current_position
-        
+
         # Update visited cells
         self.visited_cells.add(self.current_position)
-        
+
         # Update maze boundaries
         self.min_x = min(self.min_x, x)
         self.max_x = max(self.max_x, x)
         self.min_y = min(self.min_y, y)
         self.max_y = max(self.max_y, y)
-        
+
         # Initialize cell in maze_map if not already present
         if self.current_position not in self.maze_map:
             # [north_wall, east_wall, south_wall, west_wall]
             self.maze_map[self.current_position] = [False, False, False, False]
-        
-        # Update walls based on scan results and current direction
-        # Wall presence is indicated by distance less than threshold
-        for angle, distance in self.scan_results.items():
-            wall_present = distance < self.MAP_WALL_THRESHOLD_CM
-            
-            # Convert servo angle to wall direction based on current orientation
-            if angle == self.ANG_FRONT:  # Front scan
-                wall_dir = self.current_direction
-            elif angle == self.ANG_LEFT:  # Left scan
-                wall_dir = (self.current_direction - 1) % 4
-            elif angle == self.ANG_RIGHT:  # Right scan
-                wall_dir = (self.current_direction + 1) % 4
+
+        # --- Determine wall presence based on minimum distances in sectors ---
+        scan = self.scan_results
+
+        # Front wall based on 90-degree reading
+        front_dist = scan.get(self.ANG_FRONT, 0)
+        front_wall_present = front_dist < self.MAP_WALL_THRESHOLD_CM
+
+        # Left wall based on minimum of left-side readings
+        left_readings = [scan.get(a, 0) for a in self.SCAN_ANGLES if a < self.ANG_FRONT and a in scan]
+        min_left = min(left_readings) if left_readings else 999 # Use large number if no readings
+        left_wall_present = min_left < self.MAP_WALL_THRESHOLD_CM
+
+        # Right wall based on minimum of right-side readings
+        right_readings = [scan.get(a, 0) for a in self.SCAN_ANGLES if a > self.ANG_FRONT and a in scan]
+        min_right = min(right_readings) if right_readings else 999 # Use large number if no readings
+        right_wall_present = min_right < self.MAP_WALL_THRESHOLD_CM
+
+        # --- Map relative walls (front, left, right) to absolute directions (N, E, S, W) ---
+        relative_walls = {
+            0: front_wall_present,  # Relative Front
+            1: right_wall_present,  # Relative Right
+            # 2: No direct reading for back
+            3: left_wall_present    # Relative Left
+        }
+
+        for relative_dir, wall_present in relative_walls.items():
+            # Calculate absolute wall direction
+            # Relative dir 0 (Front) maps to current_direction
+            # Relative dir 1 (Right) maps to (current_direction + 1) % 4
+            # Relative dir 3 (Left) maps to (current_direction - 1 + 4) % 4
+            if relative_dir == 0:
+                abs_wall_dir = self.current_direction
+            elif relative_dir == 1:
+                abs_wall_dir = (self.current_direction + 1) % 4
+            elif relative_dir == 3:
+                abs_wall_dir = (self.current_direction - 1 + 4) % 4 # Ensure positive modulo
             else:
-                continue  # Skip invalid angles
-                
+                continue # Skip other relative directions
+
             # Update the wall in the current cell
-            self.maze_map[self.current_position][wall_dir] = wall_present
-            
-            # Update the corresponding wall in adjacent cell
+            self.maze_map[self.current_position][abs_wall_dir] = wall_present
+
+            # Update the corresponding wall in adjacent cell if a wall was detected
             if wall_present:
-                # Calculate adjacent cell position
-                if wall_dir == 0:  # North
+                adj_pos = None
+                adj_wall_dir = -1
+                # Calculate adjacent cell position and the wall to update there
+                if abs_wall_dir == 0:  # North wall in current cell
                     adj_pos = (x, y + 1)
                     adj_wall_dir = 2  # South wall of adjacent cell
-                elif wall_dir == 1:  # East
+                elif abs_wall_dir == 1:  # East wall in current cell
                     adj_pos = (x + 1, y)
                     adj_wall_dir = 3  # West wall of adjacent cell
-                elif wall_dir == 2:  # South
+                elif abs_wall_dir == 2:  # South wall in current cell
                     adj_pos = (x, y - 1)
                     adj_wall_dir = 0  # North wall of adjacent cell
-                elif wall_dir == 3:  # West
+                elif abs_wall_dir == 3:  # West wall in current cell
                     adj_pos = (x - 1, y)
                     adj_wall_dir = 1  # East wall of adjacent cell
-                
-                # Initialize adjacent cell if not already mapped
-                if adj_pos not in self.maze_map:
-                    self.maze_map[adj_pos] = [False, False, False, False]
-                    
-                # Update wall in adjacent cell
-                self.maze_map[adj_pos][adj_wall_dir] = True
+
+                if adj_pos is not None:
+                    # Initialize adjacent cell if not already mapped
+                    if adj_pos not in self.maze_map:
+                        self.maze_map[adj_pos] = [False, False, False, False]
+
+                    # Update wall in adjacent cell
+                    self.maze_map[adj_pos][adj_wall_dir] = True
     
     def a_star_pathfinding(self, start, goal):
         """Find a path from start to goal using A* algorithm"""
@@ -345,13 +392,13 @@ class MazeSolver:
                 right_safe = True
                 
                 # Check left
-                servo.set_servo_pwm('0', self.ANG_LEFT)
+                servo.set_servo_pwm('0', self.ANG_LEFT_FAR)
                 time.sleep(0.2)
                 if self.median_distance() < 15:
                     left_safe = False
                 
                 # Check right
-                servo.set_servo_pwm('0', self.ANG_RIGHT)
+                servo.set_servo_pwm('0', self.ANG_RIGHT_FAR)
                 time.sleep(0.2)
                 if self.median_distance() < 15:
                     right_safe = False
@@ -479,20 +526,24 @@ class MazeSolver:
         direction = self.get_direction(scan_results)
 
         # Debug print for real-time insight
+        scan = scan_results # Use the local variable for clarity
+        front_dist = scan.get(self.ANG_FRONT, 0)
+        left_readings = [scan.get(a, 0) for a in self.SCAN_ANGLES if a < self.ANG_FRONT and a in scan]
+        right_readings = [scan.get(a, 0) for a in self.SCAN_ANGLES if a > self.ANG_FRONT and a in scan]
+        max_left = max(left_readings) if left_readings else 0
+        max_right = max(right_readings) if right_readings else 0
+
         print(
-            f"Front {scan_results.get(self.ANG_FRONT, 0):>5.1f} cm |" 
-            f" Left {scan_results.get(self.ANG_LEFT, 0):>5.1f} cm |" 
-            f" Right {scan_results.get(self.ANG_RIGHT, 0):>5.1f} cm →" 
-            f" choice {direction.name}"
+            f"F:{front_dist:>5.1f} | L max:{max_left:>5.1f} ({len(left_readings)}) | R max:{max_right:>5.1f} ({len(right_readings)}) -> {direction.name}"
         )
 
-        direction_strings = {
-            Dir.STRAIGHT: 'straight',
-            Dir.LEFT: 'left',
-            Dir.RIGHT: 'right',
-            Dir.BACK: 'back'
-        }
-        #print(f"Moving {direction_strings[direction]}") # Original print
+        # direction_strings = {
+        #     Dir.STRAIGHT: 'straight',
+        #     Dir.LEFT: 'left',
+        #     Dir.RIGHT: 'right',
+        #     Dir.BACK: 'back'
+        # }
+        # print(f"Moving {direction_strings[direction]}") # Original print
 
         # Move in the chosen direction
         self.move(direction)
