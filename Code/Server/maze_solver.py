@@ -35,8 +35,6 @@ class MazeSolver:
         self.BASE_SPEED = 800
         self.TURN_SPEED = 1000
         self.TURN_DURATION_90 = 0.65  # Increased from 0.55 for more accurate turns
-        self.TURN_DURATION_45 = self.TURN_DURATION_90 / 2
-        self.TURN_DURATION_180 = self.TURN_DURATION_90 * 2
         self.CELL_DURATION = 0.5  # seconds to travel one grid cell
         
         # Maze solving variables
@@ -286,38 +284,30 @@ class MazeSolver:
         # Update position
         self._update_position_after_straight()
         
-    def turn(self, left=True, degrees=90):
-        """Turn in place by the specified degrees"""
+    def turn(self, left=True):
+        """Turn 90 degrees in place"""
         if self.simulation_mode:
             if left:
-                self.current_direction = (self.current_direction - (degrees // 90)) % 4
+                self.current_direction = (self.current_direction - 1) % 4
             else:
-                self.current_direction = (self.current_direction + (degrees // 90)) % 4
-            time.sleep(self.TURN_DURATION_90 * (degrees / 90))  # Simulate turning time
+                self.current_direction = (self.current_direction + 1) % 4
+            time.sleep(self.TURN_DURATION_90)  # Simulate turning time
             return
-            
-        # Determine turn duration based on degrees
-        if degrees == 45:
-            duration = self.TURN_DURATION_45
-        elif degrees == 90:
-            duration = self.TURN_DURATION_90
-        elif degrees == 180:
-            duration = self.TURN_DURATION_180
-        else:
-            duration = self.TURN_DURATION_90 * (degrees / 90)
-            
+
+        duration = self.TURN_DURATION_90
+
         # Set motors based on turn direction
         if left:
             PWM.set_motor_model(-self.TURN_SPEED, -self.TURN_SPEED,
                                 self.TURN_SPEED, self.TURN_SPEED)
             # Update direction
-            self.current_direction = (self.current_direction - (degrees // 90)) % 4
+            self.current_direction = (self.current_direction - 1) % 4
         else:
             PWM.set_motor_model(self.TURN_SPEED, self.TURN_SPEED,
                                 -self.TURN_SPEED, -self.TURN_SPEED)
             # Update direction
-            self.current_direction = (self.current_direction + (degrees // 90)) % 4
-            
+            self.current_direction = (self.current_direction + 1) % 4
+
         time.sleep(duration)
         PWM.set_motor_model(0, 0, 0, 0)
     
@@ -395,7 +385,8 @@ class MazeSolver:
                     print("Obstacle detected after turn, stopping")
                 
             elif direction is Dir.BACK:
-                self.turn(left=True, degrees=180)
+                self.turn(left=True)  # Turn 90 degrees left
+                self.turn(left=True)  # Turn another 90 degrees left (total 180)
                 if self.safety_check():
                     self.go_straight()
                 else:
