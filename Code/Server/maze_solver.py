@@ -1,9 +1,11 @@
 import time
+import sys
+import select
+import math
 from motor import *
 from gpiozero import LineSensor
 from ultrasonic import Ultrasonic
 from buzzer import Buzzer
-import math
 
 # Define sensor pins
 IR01 = 14  # Left sensor
@@ -29,14 +31,10 @@ class MazeSolver:
         self.max_turn_speed = 4000  # Maximum turn speed
         
         # Maze solving variables
-        self.grid_size = 20  # cm per grid cell
-        self.current_position = (0, 0)  # (x, y) in grid coordinates
-        self.current_direction = 0  # 0: North, 1: East, 2: South, 3: West
-        self.maze_map = {}  # Stores discovered walls
-        self.path = []  # Current A* path
         self.in_maze = False  # Whether we're in the maze or still following the line
-        self.line_lost_count = 0  # Count how many times we've lost the line
-        self.max_line_lost = 5  # Number of times to try finding line before entering maze mode
+        self.scan_positions = [0, 22.5, 45, 67.5, 90]  # Scan positions in degrees
+        self.current_scan_index = 0
+        self.scan_results = {}  # Store scan results
 
     def duty_range(self, duty1, duty2, duty3, duty4):
         if duty1 > 4095:
@@ -108,47 +106,22 @@ class MazeSolver:
         self.right_upper_wheel(duty3)
         self.right_lower_wheel(duty4)
 
-    def manhattan_distance(self, pos1, pos2):
-        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
-
-    def get_neighbors(self, pos):
-        x, y = pos
-        neighbors = []
-        for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-            new_pos = (x + dx, y + dy)
-            if new_pos not in self.maze_map.get(pos, []):
-                neighbors.append(new_pos)
-        return neighbors
-
-    def a_star_search(self, start, goal):
-        frontier = [(0, start)]
-        came_from = {start: None}
-        g_score = {start: 0}
-        f_score = {start: self.manhattan_distance(start, goal)}
-
-        while frontier:
-            current = frontier.pop(0)[1]
-            if current == goal:
-                path = []
-                while current is not None:
-                    path.append(current)
-                    current = came_from[current]
-                return path[::-1]
-
-            for neighbor in self.get_neighbors(current):
-                tentative_g_score = g_score[current] + 1
-                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
-                    came_from[neighbor] = current
-                    g_score[neighbor] = tentative_g_score
-                    f_score[neighbor] = tentative_g_score + self.manhattan_distance(neighbor, goal)
-                    if neighbor not in [i[1] for i in frontier]:
-                        frontier.append((f_score[neighbor], neighbor))
-            frontier.sort()
-
-        return None
+    def check_keyboard(self):
+        """Check if a key has been pressed"""
+        if select.select([sys.stdin], [], [], 0)[0]:
+            key = sys.stdin.read(1)
+            if key == 'q':  # Press 'q' to stop line following
+                print("Manual transition to maze solving mode")
+                self.in_maze = True
+                return True
+        return False
 
     def follow_line(self):
         """Follow the black line using the proven line following logic"""
+        # Check for keyboard input
+        if self.check_keyboard():
+            return
+
         # Check for obstacles first
         d = ultrasonic.get_distance()
         if d is not None and d <= 50:
@@ -171,7 +144,6 @@ class MazeSolver:
         # Use your proven motor control logic
         if self.LMR == 2:  # Only middle sensor detects line
             self.set_motor_model(self.base_speed, self.base_speed, self.base_speed, self.base_speed)
-            self.line_lost_count = 0
         elif self.LMR == 4:  # Middle and right sensors detect line
             self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
         elif self.LMR == 6:  # Right sensor detects line
@@ -185,59 +157,51 @@ class MazeSolver:
             time.sleep(0.5)
             self.in_maze = True  # Transition to maze solving
             print("Transitioning to maze solving mode")
-        else:  # No line detected
-            self.line_lost_count += 1
-            if self.line_lost_count < self.max_line_lost:
-                # Search for line by turning right
-                self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
-            else:
-                # Line lost for too long, transition to maze solving
-                self.in_maze = True
-                print("Transitioning to maze solving mode")
-                self.set_motor_model(0, 0, 0, 0)
-                time.sleep(1)
 
-    def update_maze_map(self):
-        """Update the maze map based on ultrasonic sensor readings"""
-        # Check left
-        ultrasonic.trigger_pin = 27
-        ultrasonic.echo_pin = 22
-        left_dist = ultrasonic.get_distance()
-        
-        # Check front
+    def scan_ultrasonic(self):
+        """Scan the ultrasonic sensor across a 90-degree field"""
+        # Configure ultrasonic sensor for scanning
         ultrasonic.trigger_pin = 5
         ultrasonic.echo_pin = 6
-        front_dist = ultrasonic.get_distance()
         
-        # Check right
-        ultrasonic.trigger_pin = 13
-        ultrasonic.echo_pin = 19
-        right_dist = ultrasonic.get_distance()
+        # Scan at each position
+        for angle in self.scan_positions:
+            # Simulate turning the sensor (in reality, you might need to physically turn it)
+            print(f"Scanning at {angle} degrees")
+            distance = ultrasonic.get_distance()
+            if distance is not None:
+                self.scan_results[angle] = distance
+            time.sleep(0.1)  # Small delay between scans
+
+    def find_best_direction(self):
+        """Find the direction with the most space ahead"""
+        if not self.scan_results:
+            return None
+
+        # Find the angle with the maximum distance
+        best_angle = max(self.scan_results, key=self.scan_results.get)
+        best_distance = self.scan_results[best_angle]
         
-        # Update maze map with detected walls
-        if left_dist is not None and left_dist < 30:
-            wall_pos = (self.current_position[0] - 1, self.current_position[1])
-            if self.current_position not in self.maze_map:
-                self.maze_map[self.current_position] = []
-            if wall_pos not in self.maze_map[self.current_position]:
-                self.maze_map[self.current_position].append(wall_pos)
-            
-        if front_dist is not None and front_dist < 30:
-            wall_pos = (self.current_position[0], self.current_position[1] + 1)
-            if self.current_position not in self.maze_map:
-                self.maze_map[self.current_position] = []
-            if wall_pos not in self.maze_map[self.current_position]:
-                self.maze_map[self.current_position].append(wall_pos)
-            
-        if right_dist is not None and right_dist < 30:
-            wall_pos = (self.current_position[0] + 1, self.current_position[1])
-            if self.current_position not in self.maze_map:
-                self.maze_map[self.current_position] = []
-            if wall_pos not in self.maze_map[self.current_position]:
-                self.maze_map[self.current_position].append(wall_pos)
+        print(f"Best direction: {best_angle} degrees with {best_distance}cm")
+        return best_angle, best_distance
+
+    def turn_to_angle(self, target_angle):
+        """Turn the car to face the target angle"""
+        # Calculate turn duration based on angle difference
+        turn_duration = abs(target_angle) / 90.0  # Normalize to 90 degrees
+        
+        if target_angle > 0:
+            # Turn right
+            self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
+        else:
+            # Turn left
+            self.set_motor_model(self.turn_speed, self.turn_speed, -self.turn_speed, -self.turn_speed)
+        
+        time.sleep(turn_duration)
+        self.set_motor_model(0, 0, 0, 0)
 
     def solve_maze(self):
-        """Navigate through the maze using A* algorithm"""
+        """Navigate through the maze using ultrasonic scanning"""
         # First check for immediate obstacles
         distance = ultrasonic.get_distance()
         if distance is not None and distance < 30:
@@ -245,66 +209,52 @@ class MazeSolver:
             buzzer.run('1')
             time.sleep(0.2)
             buzzer.run('0')
-            self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
             time.sleep(0.5)
-            return
-
-        # Update maze map and find path
-        self.update_maze_map()
-        
-        if not self.path:
-            goal_position = (5, 5)  # Example goal position
-            self.path = self.a_star_search(self.current_position, goal_position)
-        
-        if self.path:
-            next_pos = self.path[0]
-            dx = next_pos[0] - self.current_position[0]
-            dy = next_pos[1] - self.current_position[1]
             
-            # Determine required turn
-            required_direction = 0
-            if dx == 1: required_direction = 1
-            elif dx == -1: required_direction = 3
-            elif dy == 1: required_direction = 0
-            elif dy == -1: required_direction = 2
+            # Scan for best direction
+            self.scan_ultrasonic()
+            best_angle, best_distance = self.find_best_direction()
             
-            # Execute turn if needed
-            turn_diff = (required_direction - self.current_direction) % 4
-            if turn_diff == 1:  # Turn right
+            if best_angle is not None:
+                # Turn to face the best direction
+                self.turn_to_angle(best_angle)
+                time.sleep(0.5)
+                
+                # Move forward if there's enough space
+                if best_distance > 30:
+                    self.set_motor_model(self.base_speed, self.base_speed, self.base_speed, self.base_speed)
+                    time.sleep(1.0)
+            else:
+                # No good direction found, turn right
                 self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
-                time.sleep(0.3)
-            elif turn_diff == 3:  # Turn left
-                self.set_motor_model(self.turn_speed, self.turn_speed, -self.turn_speed, -self.turn_speed)
-                time.sleep(0.3)
-            elif turn_diff == 2:  # Turn around
-                self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
-                time.sleep(0.6)
-            
-            self.current_direction = required_direction
-            
-            # Move forward one grid cell
-            self.set_motor_model(self.base_speed, self.base_speed, self.base_speed, self.base_speed)
-            time.sleep(0.8)
-            
-            # Update position
-            self.current_position = next_pos
-            self.path.pop(0)
+                time.sleep(0.5)
         else:
-            # No path found, turn right to search
-            self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
-            time.sleep(0.3)
+            # No immediate obstacle, move forward
+            self.set_motor_model(self.base_speed, self.base_speed, self.base_speed, self.base_speed)
+            time.sleep(0.5)
 
     def run(self):
         try:
             print("Starting maze solver...")
             print("First following the line...")
+            print("Press 'q' to manually transition to maze solving mode")
             
-            while True:
-                if not self.in_maze:
-                    self.follow_line()
-                else:
-                    self.solve_maze()
-                time.sleep(0.05)  # Small delay to prevent overwhelming the system
+            # Enable non-blocking keyboard input
+            import tty
+            import termios
+            old_settings = termios.tcgetattr(sys.stdin)
+            try:
+                tty.setcbreak(sys.stdin.fileno())
+                
+                while True:
+                    if not self.in_maze:
+                        self.follow_line()
+                    else:
+                        self.solve_maze()
+                    time.sleep(0.05)  # Small delay to prevent overwhelming the system
+
+            finally:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
 
         except KeyboardInterrupt:
             print("\nStopping maze solver...")
