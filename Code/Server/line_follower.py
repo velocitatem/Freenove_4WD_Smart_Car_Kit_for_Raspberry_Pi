@@ -103,14 +103,6 @@ class Line_Tracking:
         
     def run(self):
         while True:
-            d=ultrasonic.get_distance()
-            if d<=50:
-                B=Buzzer()
-                B.run('1')
-                time.sleep(3)
-                B.run('0')
-                PWM.set_motor_model(0,0,0,0)
-                break;
             self.LMR=0x00
             if IR01_sensor.value == True:
                 self.LMR=(self.LMR | 4)
@@ -119,15 +111,15 @@ class Line_Tracking:
             if IR03_sensor.value == True:
                 self.LMR=(self.LMR | 1)
             if self.LMR==2:
-                PWM.set_motor_model(800,800,800,800)
+                PWM.set_motor_model(400,400,400,400)
             elif self.LMR==4:
-                PWM.set_motor_model(-1500,-1500,2500,2500)
+                PWM.set_motor_model(-750,-750,1250,1250)
             elif self.LMR==6:
-                PWM.set_motor_model(-2000,-2000,4000,4000)
+                PWM.set_motor_model(-1000,-1000,2000,2000)
             elif self.LMR==1:
-                PWM.set_motor_model(2500,2500,-1500,-1500)
+                PWM.set_motor_model(1250,1250,-750,-750)
             elif self.LMR==3:
-                PWM.set_motor_model(4000,4000,-2000,-2000)
+                PWM.set_motor_model(2000,2000,-1000,-1000)
             elif self.LMR==7:
                 #pass
                 PWM.set_motor_model(0,0,0,0)
