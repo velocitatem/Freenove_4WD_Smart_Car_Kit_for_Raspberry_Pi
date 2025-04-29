@@ -4,6 +4,7 @@ from infrared import Infrared
 from ultrasonic import Ultrasonic
 from buzzer import Buzzer
 from servo import Servo
+from motor import Ordinary_Car
 import math
 
 # Initialize sensors
@@ -11,11 +12,10 @@ infrared = Infrared()
 ultrasonic = Ultrasonic()
 buzzer = Buzzer()
 servo = Servo()
-
+PWM = Ordinary_Car()
 class MazeSolver:
     def __init__(self):
-        self.pwm = PCA9685(0x40, debug=True)
-        self.pwm.set_pwm_freq(50)
+        self.pwm = PWM
         
         # Maze solving variables
         self.grid_size = 20  # cm per grid cell
@@ -32,6 +32,7 @@ class MazeSolver:
         
         # Servo scanning parameters
         self.scan_angles = [50, 70, 90, 110, 130]  # Servo angles to scan
+        self.scan_angles = [x+5 for x in self.scan_angles] # error correction
         self.scan_results = {}  # Store scan results
         self.current_scan_index = 0
 
@@ -39,6 +40,7 @@ class MazeSolver:
         """Scan the environment using the servo-mounted ultrasonic sensor"""
         self.scan_results = {}  # Clear previous results
         # results format: {angle: distance}
+
         
         for angle in self.scan_angles:
             # Move servo to scan angle
@@ -89,23 +91,14 @@ class MazeSolver:
         direction = self.get_direction(scan_results)
         direction_strings = ['straight', 'right', 'left']
         print(direction_strings[direction])
-        move_distance_cm = 2
         if direction == 0:
-            self.pwm.set_motor_pwm(0, 1000)
-            self.pwm.set_motor_pwm(1, 1000)
-            time.sleep(move_distance_cm / 1000)
+            PWM.set_motor_model(1000,1000,1000,1000)
         elif direction == 1:
-            self.pwm.set_motor_pwm(0, 1000)
-            self.pwm.set_motor_pwm(1, 1000)
-            time.sleep(move_distance_cm / 1000)
+            PWM.set_motor_model(1000,1000,-1000,-1000)
         elif direction == 2:
-            self.pwm.set_motor_pwm(0, 1000)
-            self.pwm.set_motor_pwm(1, 1000)
-            time.sleep(move_distance_cm / 1000)
+            PWM.set_motor_model(-1000,-1000,1000,1000)
         else:
-            self.pwm.set_motor_pwm(0, 0)
-            self.pwm.set_motor_pwm(1, 0)
-            time.sleep(move_distance_cm / 1000)
+            PWM.set_motor_model(0,0,0,0)
         time.sleep(0.1)
 
         # update position
