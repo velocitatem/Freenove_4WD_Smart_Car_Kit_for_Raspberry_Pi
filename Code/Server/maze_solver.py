@@ -31,8 +31,7 @@ class MazeSolver:
         self.max_stuck_count = 5
         
         # Servo scanning parameters
-        self.scan_angles = [50, 70, 90, 110, 130]  # Servo angles to scan
-        self.scan_angles = [x+5 for x in self.scan_angles] # error correction
+        self.scan_angles = [0, 90, 130]  # Servo angles to scan
         self.scan_results = {}  # Store scan results
         self.current_scan_index = 0
 
@@ -61,7 +60,7 @@ class MazeSolver:
             self.scan_results[angle] = average_distance
             
             # Move servo to next angle
-            servo.set_servo_pwm('0', angle + 10)
+            servo.set_servo_pwm('0', angle+ 15)
             time.sleep(0.2)  # Wait for servo to move
             
         # Reset servo to center position
@@ -74,16 +73,16 @@ class MazeSolver:
         """Determine the direction to move based on the scan results"""
         # see if we can go straight
         DISTANCE = 20
-        if scan_results[95] > DISTANCE:
+        if scan_results[90] > DISTANCE:
             return 0
         # see if we can go right
-        if scan_results[135] > DISTANCE:
+        if scan_results[130] > DISTANCE:
             return 1
         # see if we can go left
-        if scan_results[55] > DISTANCE:
+        if scan_results[0] > DISTANCE:
             return 2
-        # if no clear path, turn right
-        return 1
+        # if no clear path, move back
+        return -1
 
     def run(self):
 
@@ -91,7 +90,7 @@ class MazeSolver:
         scan_results = self.scan_environment()
         print(scan_results)
         direction = self.get_direction(scan_results)
-        direction_strings = ['straight', 'right', 'left']
+        direction_strings = ['straight', 'right', 'left', 'back']
         print(direction_strings[direction])
         MAG = 100
         if direction == 0:
@@ -115,7 +114,8 @@ class MazeSolver:
 
 if __name__ == '__main__':
     maze_solver = MazeSolver()
-    maze_solver.run_loop()
+    maze_solver.run()
+    #maze_solver.run_loop()
 
 
 
