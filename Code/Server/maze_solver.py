@@ -12,6 +12,13 @@ from queue import PriorityQueue
 import json
 from enum import IntEnum
 from collections import deque
+import os
+from pathlib import Path
+
+# Import new components
+from geometry import CELL_CM, COLS, ROWS, WALL_THICKCM, START_CELL, EXIT_CELL, DX, DY
+from calibration import load_calibration, save_calibration, calibrate_straight_movement
+from pose import Pose
 
 # Direction enum for consistent direction handling
 class Dir(IntEnum):
@@ -31,37 +38,33 @@ class MazeSolver:
     def __init__(self):
         self.pwm = PWM
         
-        # Constants for movement
-        self.BASE_SPEED = 2000
-        self.TURN_SPEED = 2500
-        self.TURN_DURATION_90 = 0.65  # Increased from 0.55 for more accurate turns
-        self.CELL_DURATION = 0.2  # seconds to travel one grid cell
+        # Load calibration values
+        calib = load_calibration()
+        
+        # Constants for movement from calibration
+        self.BASE_SPEED = calib["BASE_SPEED"]
+        self.TURN_SPEED = calib["TURN_SPEED"]
+        self.TURN_DURATION_90 = calib["TURN_DURATION_90"]
+        self.sec_per_cell = calib["SEC_PER_CELL"]
+        
+        # Use Pose class for tracking position
+        self.pose = Pose(START_CELL, 0)  # Start at (0,4) facing North (0)
         
         # Maze solving variables
-        self.grid_size = 20  # cm per grid cell
-        self.current_position = (0, 0)  # (x, y) in grid coordinates
-        self.current_direction = 0  # 0: North, 1: East, 2: South, 3: West
-        self.maze_map = {}  # Dictionary to store discovered maze cells: {(x,y): [north_wall, east_wall, south_wall, west_wall]}
+        self.maze_map = {}  # Dictionary: {(x,y): [north_wall, east_wall, south_wall, west_wall]}
         self.visited_cells = set()  # Set of visited cells
         self.path = []  # Current A* path
         self.target_position = None  # Target position for pathfinding
-        self.in_maze = False  # Whether we're in the maze or still following the line
-        
-        # Maze dimensions
-        self.min_x = 0
-        self.max_x = 0
-        self.min_y = 0
-        self.max_y = 0
         
         # Stuck detection
         self.last_positions = deque(maxlen=8)
         
         # Servo scanning parameters
-        # self.scan_angles = [0, 90, 180]  # Old angles
-        self.SCAN_ANGLES = [15, 45, 75, 90, 105, 135, 165] # New angles (7 points)
-        self.SERVO_MOVE_TIME = 0.5# Increased pause time for servo to settle
-        self.READING_PAUSE = 0.05 # Small pause after reading
-        # Keep old angle names for reference in logic if needed, though direct angles used now
+        self.SCAN_ANGLES = [15, 45, 75, 90, 105, 135, 165] # 7 points
+        self.SERVO_MOVE_TIME = 0.5 # seconds for servo to settle
+        self.READING_PAUSE = 0.05 # seconds after reading
+        
+        # Define constant angle names for clarity in code
         self.ANG_LEFT_FAR = 15
         self.ANG_LEFT_MID = 45
         self.ANG_LEFT_NEAR = 75
@@ -70,12 +73,11 @@ class MazeSolver:
         self.ANG_RIGHT_MID = 135
         self.ANG_RIGHT_FAR = 165
         self.scan_results = {}  # Store scan results {angle: distance}
-        self.observations = []
         
-        # Wall detection threshold - ADJUSTED
-        self.FRONT_CLEAR_CM = 45     # start the turn sooner
-        self.SIDE_CLEAR_CM  = 35     # sides may be slightly closer
-        self.MAP_WALL_THRESHOLD_CM = 30 # Threshold for marking walls in the map
+        # Wall detection thresholds based on cell size
+        self.FRONT_CLEAR_CM = 0.9 * CELL_CM  # ~30 cm
+        self.SIDE_CLEAR_CM = 0.6 * CELL_CM   # ~20 cm
+        self.MAP_WALL_THRESHOLD_CM = 0.7 * CELL_CM  # ~23 cm
         
         # For simulation mode (no hardware)
         self.simulation_mode = False
@@ -92,8 +94,61 @@ class MazeSolver:
         samples.sort()
         return samples[len(samples)//2]
         
+    def align_to_walls(self):
+        """Align the robot perpendicular to walls before scanning"""
+        if self.simulation_mode:
+            time.sleep(0.2)  # Simulate alignment time
+            return
+            
+        # Look left
+        servo.set_servo_pwm('0', self.ANG_LEFT_FAR)
+        time.sleep(0.3)
+        left = self.median_distance()
+        
+        # Look right
+        servo.set_servo_pwm('0', self.ANG_RIGHT_FAR)
+        time.sleep(0.3)
+        right = self.median_distance()
+        
+        # Center servo
+        servo.set_servo_pwm('0', self.ANG_FRONT)
+        time.sleep(0.2)
+        
+        # Check if alignment is needed
+        if abs(left - right) > 3:  # >3 cm skew
+            print(f"Aligning: Left={left:.1f}cm, Right={right:.1f}cm")
+            if left > right:
+                self.nudge_left()
+            else:
+                self.nudge_right()
+                
+    def nudge_left(self):
+        """Small correction to the left"""
+        if self.simulation_mode:
+            time.sleep(0.1)
+            return
+            
+        # Short low-speed pulse on right wheels
+        PWM.set_motor_model(0, 0, 800, 800)
+        time.sleep(0.1)
+        PWM.set_motor_model(0, 0, 0, 0)
+        
+    def nudge_right(self):
+        """Small correction to the right"""
+        if self.simulation_mode:
+            time.sleep(0.1)
+            return
+            
+        # Short low-speed pulse on left wheels
+        PWM.set_motor_model(800, 800, 0, 0)
+        time.sleep(0.1)
+        PWM.set_motor_model(0, 0, 0, 0)
+        
     def scan_environment(self):
         """Scan the environment using the servo-mounted ultrasonic sensor across defined angles."""
+        # First align to walls for more accurate scanning
+        self.align_to_walls()
+        
         self.scan_results = {}  # Clear previous results
 
         if self.simulation_mode:
@@ -120,12 +175,10 @@ class MazeSolver:
             distance = self.median_distance()
             self.scan_results[angle] = distance
             time.sleep(self.READING_PAUSE) # Add pause after reading
-            # print(f"Scan Angle {angle}: {distance:.1f} cm") # Optional debug print
 
         # Reset servo to center position after scan
         servo.set_servo_pwm('0', self.ANG_FRONT) # Reset to front (90)
         time.sleep(0.2)
-        # print("Scan Results:", {a: f"{d:.1f}" for a, d in self.scan_results.items()}) # Optional summary print
         return self.scan_results
     
     def get_direction(self, scan):
@@ -158,89 +211,62 @@ class MazeSolver:
     
     def update_maze_map(self):
         """Update the maze map based on the current position and multi-point scan results."""
-        x, y = self.current_position
-
+        x, y = self.pose.cell
+        
         # Update visited cells
-        self.visited_cells.add(self.current_position)
-
-        # Update maze boundaries
-        self.min_x = min(self.min_x, x)
-        self.max_x = max(self.max_x, x)
-        self.min_y = min(self.min_y, y)
-        self.max_y = max(self.max_y, y)
-
+        self.visited_cells.add(self.pose.cell)
+        
         # Initialize cell in maze_map if not already present
-        if self.current_position not in self.maze_map:
+        if self.pose.cell not in self.maze_map:
             # [north_wall, east_wall, south_wall, west_wall]
-            self.maze_map[self.current_position] = [False, False, False, False]
-
-        # --- Determine wall presence based on minimum distances in sectors ---
+            self.maze_map[self.pose.cell] = [False, False, False, False]
+            
         scan = self.scan_results
-
-        # Front wall based on 90-degree reading
+        
+        # Determine wall presence based on scan results and thresholds
+        # Front wall
         front_dist = scan.get(self.ANG_FRONT, 0)
-        front_wall_present = front_dist < self.MAP_WALL_THRESHOLD_CM
-
-        # Left wall based on minimum of left-side readings
+        front_wall = front_dist < self.MAP_WALL_THRESHOLD_CM
+        
+        # Left wall (minimum of left readings)
         left_readings = [scan.get(a, 0) for a in self.SCAN_ANGLES if a < self.ANG_FRONT and a in scan]
-        min_left = min(left_readings) if left_readings else 999 # Use large number if no readings
-        left_wall_present = min_left < self.MAP_WALL_THRESHOLD_CM
-
-        # Right wall based on minimum of right-side readings
+        min_left = min(left_readings) if left_readings else float('inf')
+        left_wall = min_left < self.MAP_WALL_THRESHOLD_CM
+        
+        # Right wall (minimum of right readings)
         right_readings = [scan.get(a, 0) for a in self.SCAN_ANGLES if a > self.ANG_FRONT and a in scan]
-        min_right = min(right_readings) if right_readings else 999 # Use large number if no readings
-        right_wall_present = min_right < self.MAP_WALL_THRESHOLD_CM
-
-        # --- Map relative walls (front, left, right) to absolute directions (N, E, S, W) ---
-        relative_walls = {
-            0: front_wall_present,  # Relative Front
-            1: right_wall_present,  # Relative Right
-            # 2: No direct reading for back
-            3: left_wall_present    # Relative Left
+        min_right = min(right_readings) if right_readings else float('inf')
+        right_wall = min_right < self.MAP_WALL_THRESHOLD_CM
+        
+        # Map relative walls to absolute directions
+        walls = {
+            0: front_wall,  # Front
+            1: right_wall,  # Right
+            3: left_wall    # Left
         }
-
-        for relative_dir, wall_present in relative_walls.items():
-            # Calculate absolute wall direction
-            # Relative dir 0 (Front) maps to current_direction
-            # Relative dir 1 (Right) maps to (current_direction + 1) % 4
-            # Relative dir 3 (Left) maps to (current_direction - 1 + 4) % 4
-            if relative_dir == 0:
-                abs_wall_dir = self.current_direction
-            elif relative_dir == 1:
-                abs_wall_dir = (self.current_direction + 1) % 4
-            elif relative_dir == 3:
-                abs_wall_dir = (self.current_direction - 1 + 4) % 4 # Ensure positive modulo
-            else:
-                continue # Skip other relative directions
-
-            # Update the wall in the current cell
-            self.maze_map[self.current_position][abs_wall_dir] = wall_present
-
-            # Update the corresponding wall in adjacent cell if a wall was detected
-            if wall_present:
-                adj_pos = None
-                adj_wall_dir = -1
-                # Calculate adjacent cell position and the wall to update there
-                if abs_wall_dir == 0:  # North wall in current cell
-                    adj_pos = (x, y + 1)
-                    adj_wall_dir = 2  # South wall of adjacent cell
-                elif abs_wall_dir == 1:  # East wall in current cell
-                    adj_pos = (x + 1, y)
-                    adj_wall_dir = 3  # West wall of adjacent cell
-                elif abs_wall_dir == 2:  # South wall in current cell
-                    adj_pos = (x, y - 1)
-                    adj_wall_dir = 0  # North wall of adjacent cell
-                elif abs_wall_dir == 3:  # West wall in current cell
-                    adj_pos = (x - 1, y)
-                    adj_wall_dir = 1  # East wall of adjacent cell
-
-                if adj_pos is not None:
-                    # Initialize adjacent cell if not already mapped
-                    if adj_pos not in self.maze_map:
-                        self.maze_map[adj_pos] = [False, False, False, False]
-
-                    # Update wall in adjacent cell
-                    self.maze_map[adj_pos][adj_wall_dir] = True
+        
+        # Update walls in current cell and adjacent cells
+        for rel_dir, has_wall in walls.items():
+            # Calculate absolute direction
+            abs_dir = (self.pose.heading + rel_dir) % 4
+            
+            # Update wall in current cell
+            self.maze_map[self.pose.cell][abs_dir] = has_wall
+            
+            # If there's a wall, update the adjacent cell too
+            if has_wall:
+                # Calculate adjacent cell coordinates
+                adj_x = x + DX[abs_dir]
+                adj_y = y + DY[abs_dir]
+                adj_pos = (adj_x, adj_y)
+                
+                # Initialize adjacent cell if needed
+                if adj_pos not in self.maze_map:
+                    self.maze_map[adj_pos] = [False, False, False, False]
+                
+                # Update the opposite wall in the adjacent cell
+                opposite_dir = (abs_dir + 2) % 4
+                self.maze_map[adj_pos][opposite_dir] = True
     
     def a_star_pathfinding(self, start, goal):
         """Find a path from start to goal using A* algorithm"""
@@ -312,7 +338,7 @@ class MazeSolver:
             return None
             
         # Find the closest unexplored cell
-        current = self.current_position
+        current = self.pose.cell
         closest = min(unexplored, key=lambda pos: self.heuristic(current, pos))
         
         return closest
@@ -321,44 +347,43 @@ class MazeSolver:
     def go_straight(self, cells=1):
         """Move straight ahead for the specified number of cells"""
         if self.simulation_mode:
-            self._update_position_after_straight()
-            time.sleep(self.CELL_DURATION * cells)  # Simulate movement time
+            self.pose.update_after_straight(cells)
+            time.sleep(self.sec_per_cell * cells)  # Simulate movement time
             return
             
-        PWM.set_motor_model(self.BASE_SPEED, self.BASE_SPEED, 
-                            self.BASE_SPEED, self.BASE_SPEED)
-        time.sleep(self.CELL_DURATION * cells)
-        PWM.set_motor_model(0, 0, 0, 0)
+        # Calculate movement time based on calibration
+        run_time = self.sec_per_cell * cells
+        
+        # Move forward at calibrated speed
+        self.pwm.set_motor_model(self.BASE_SPEED, self.BASE_SPEED, 
+                                 self.BASE_SPEED, self.BASE_SPEED)
+        time.sleep(run_time)
+        self.pwm.set_motor_model(0, 0, 0, 0)  # Stop
         
         # Update position
-        self._update_position_after_straight()
+        self.pose.update_after_straight(cells)
         
     def turn(self, left=True):
         """Turn 90 degrees in place"""
         if self.simulation_mode:
-            if left:
-                self.current_direction = (self.current_direction - 1) % 4
-            else:
-                self.current_direction = (self.current_direction + 1) % 4
+            self.pose.update_after_turn(left)
             time.sleep(self.TURN_DURATION_90)  # Simulate turning time
             return
 
-        duration = self.TURN_DURATION_90
-
         # Set motors based on turn direction
         if left:
-            PWM.set_motor_model(-self.TURN_SPEED, -self.TURN_SPEED,
-                                self.TURN_SPEED, self.TURN_SPEED)
-            # Update direction
-            self.current_direction = (self.current_direction - 1) % 4
+            self.pwm.set_motor_model(-self.TURN_SPEED, -self.TURN_SPEED,
+                                     self.TURN_SPEED, self.TURN_SPEED)
         else:
-            PWM.set_motor_model(self.TURN_SPEED, self.TURN_SPEED,
-                                -self.TURN_SPEED, -self.TURN_SPEED)
-            # Update direction
-            self.current_direction = (self.current_direction + 1) % 4
+            self.pwm.set_motor_model(self.TURN_SPEED, self.TURN_SPEED,
+                                    -self.TURN_SPEED, -self.TURN_SPEED)
 
-        time.sleep(duration)
-        PWM.set_motor_model(0, 0, 0, 0)
+        # Wait for turn duration
+        time.sleep(self.TURN_DURATION_90)
+        self.pwm.set_motor_model(0, 0, 0, 0)  # Stop
+        
+        # Update pose heading
+        self.pose.update_after_turn(left)
     
     def safety_check(self):
         """Perform a safety check to avoid collisions"""
@@ -380,10 +405,10 @@ class MazeSolver:
             direction: Dir enum value (STRAIGHT, LEFT, RIGHT, BACK)
         """
         # Record position for stuck detection
-        self.last_positions.append(self.current_position)
+        self.last_positions.append(self.pose.cell)
         
         # Record current position as visited
-        self.visited_cells.add(self.current_position)
+        self.visited_cells.add(self.pose.cell)
         
         try:
             # Safety check before straight moves
@@ -448,7 +473,7 @@ class MazeSolver:
         except Exception as e:
             print(f"Error during movement: {e}")
             # Ensure car stops if there's an error
-            PWM.set_motor_model(0, 0, 0, 0)
+            self.pwm.set_motor_model(0, 0, 0, 0)
     
     def recovery_spin(self):
         """Recovery behavior when stuck in a loop"""
@@ -458,25 +483,6 @@ class MazeSolver:
         # Clear stuck detection
         self.last_positions.clear()
     
-    def _update_position_after_straight(self):
-        """Update position after moving straight"""
-        x, y = self.current_position
-        if self.current_direction == 0:  # North
-            self.current_position = (x, y + 1)
-        elif self.current_direction == 1:  # East
-            self.current_position = (x + 1, y)
-        elif self.current_direction == 2:  # South
-            self.current_position = (x, y - 1)
-        elif self.current_direction == 3:  # West
-            self.current_position = (x - 1, y)
-                
-        # Update maze boundaries
-        x, y = self.current_position
-        self.min_x = min(self.min_x, x)
-        self.max_x = max(self.max_x, x)
-        self.min_y = min(self.min_y, y)
-        self.max_y = max(self.max_y, y)
-    
     def follow_path(self, path):
         """Follow a given path using the robot's movement capabilities"""
         if not path or len(path) < 2:
@@ -485,50 +491,56 @@ class MazeSolver:
             
         # Start from the second point (first is current position)
         for next_pos in path[1:]:
-            # Calculate direction to move
-            curr_x, curr_y = self.current_position
-            next_x, next_y = next_pos
-            
-            # Calculate relative direction
-            if next_x > curr_x:  # East
-                target_direction = 1
-            elif next_x < curr_x:  # West
-                target_direction = 3
-            elif next_y > curr_y:  # North
-                target_direction = 0
-            else:  # South
-                target_direction = 2
-                
-            # Calculate turn needed
-            turn = (target_direction - self.current_direction) % 4
-            
-            # Convert turn to movement command
-            if turn == 0:  # No turn needed
-                move_command = Dir.STRAIGHT
-            elif turn == 1:  # 90 degrees right
-                move_command = Dir.RIGHT
-            elif turn == 2:  # 180 degrees
-                move_command = Dir.BACK
-            elif turn == 3:  # 90 degrees left
-                move_command = Dir.LEFT
+            # Get command to move to the next position
+            move_command = self._command_to(next_pos)
                 
             # Execute movement
             self.move(move_command)
+            
+    def _command_to(self, next_pos):
+        """Calculate the command needed to move to the next position"""
+        # Calculate direction to move
+        curr_x, curr_y = self.pose.cell
+        next_x, next_y = next_pos
+        
+        # Calculate target absolute direction
+        if next_x > curr_x:  # East
+            target_direction = 1
+        elif next_x < curr_x:  # West
+            target_direction = 3
+        elif next_y > curr_y:  # North
+            target_direction = 0
+        else:  # South
+            target_direction = 2
+            
+        # Calculate turn needed
+        turn = (target_direction - self.pose.heading) % 4
+        
+        # Convert turn to movement command
+        if turn == 0:  # No turn needed
+            move_command = Dir.STRAIGHT
+        elif turn == 1:  # 90 degrees right
+            move_command = Dir.RIGHT
+        elif turn == 2:  # 180 degrees
+            move_command = Dir.BACK
+        elif turn == 3:  # 90 degrees left
+            move_command = Dir.LEFT
+            
+        return move_command
     
     def run_step(self):
         """Run a single step of the maze solving algorithm"""
         # Scan the environment
         scan_results = self.scan_environment()
-        #print("Scan results:", scan_results) # Original print
 
         # Update the maze map based on scan results
         self.update_maze_map()
 
-        # Choose next direction based on new algorithm
+        # Choose next direction based on scan results
         direction = self.get_direction(scan_results)
 
         # Debug print for real-time insight
-        scan = scan_results # Use the local variable for clarity
+        scan = scan_results
         front_dist = scan.get(self.ANG_FRONT, 0)
         left_readings = [scan.get(a, 0) for a in self.SCAN_ANGLES if a < self.ANG_FRONT and a in scan]
         right_readings = [scan.get(a, 0) for a in self.SCAN_ANGLES if a > self.ANG_FRONT and a in scan]
@@ -536,16 +548,8 @@ class MazeSolver:
         max_right = max(right_readings) if right_readings else 0
 
         print(
-            f"F:{front_dist:>5.1f} | L max:{max_left:>5.1f} ({len(left_readings)}) | R max:{max_right:>5.1f} ({len(right_readings)}) -> {direction.name}"
+            f"POS:{self.pose.cell} | F:{front_dist:>5.1f} | L:{max_left:>5.1f} | R:{max_right:>5.1f} -> {direction.name}"
         )
-
-        # direction_strings = {
-        #     Dir.STRAIGHT: 'straight',
-        #     Dir.LEFT: 'left',
-        #     Dir.RIGHT: 'right',
-        #     Dir.BACK: 'back'
-        # }
-        # print(f"Moving {direction_strings[direction]}") # Original print
 
         # Move in the chosen direction
         self.move(direction)
@@ -554,14 +558,15 @@ class MazeSolver:
     
     def run_exploration(self, steps=10):
         """Run exploration for a set number of steps"""
-        for _ in range(steps):
+        for i in range(steps):
+            print(f"Step {i+1}/{steps}")
             self.run_step()
             time.sleep(0.5)  # Small delay between steps
     
     def run_to_target(self, target_position):
         """Run to a specific target position using A* pathfinding"""
         # Find path to target
-        path = self.a_star_pathfinding(self.current_position, target_position)
+        path = self.a_star_pathfinding(self.pose.cell, target_position)
         
         if not path:
             print(f"No path found to target {target_position}")
@@ -576,6 +581,25 @@ class MazeSolver:
         
         return True
     
+    def preload_maze(self, blueprint):
+        """Preload a known maze layout"""
+        for y in range(ROWS):
+            for x in range(COLS):
+                code = blueprint[y][x]
+                
+                # Convert maze code to wall configuration
+                walls = [False] * 4
+                if code & 1:  # North wall
+                    walls[0] = True
+                if code & 2:  # East wall
+                    walls[1] = True
+                if code & 4:  # South wall
+                    walls[2] = True
+                if code & 8:  # West wall
+                    walls[3] = True
+                    
+                self.maze_map[(x, y)] = walls
+    
     def save_maze_map(self, filename):
         """Save the maze map to a JSON file"""
         # Convert maze_map keys to strings for JSON serialization
@@ -584,10 +608,6 @@ class MazeSolver:
         data = {
             "maze_map": serializable_map,
             "visited_cells": list(map(list, self.visited_cells)),
-            "min_x": self.min_x,
-            "max_x": self.max_x,
-            "min_y": self.min_y,
-            "max_y": self.max_y
         }
         
         with open(filename, 'w') as f:
@@ -604,17 +624,37 @@ class MazeSolver:
             # Convert maze_map keys back to tuples
             self.maze_map = {eval(k): v for k, v in data["maze_map"].items()}
             self.visited_cells = set(map(tuple, data["visited_cells"]))
-            self.min_x = data["min_x"]
-            self.max_x = data["max_x"]
-            self.min_y = data["min_y"]
-            self.max_y = data["max_y"]
             
             print(f"Maze map loaded from {filename}")
             return True
         except Exception as e:
             print(f"Error loading maze map: {e}")
             return False
-
+    
+    def calibrate(self):
+        """Run calibration for movement parameters"""
+        if self.simulation_mode:
+            print("Cannot calibrate in simulation mode")
+            return
+            
+        print("Starting movement calibration...")
+        
+        # Load current calibration
+        calib = load_calibration()
+        
+        # Calibrate straight movement (time per cell)
+        print("\n=== Straight Movement Calibration ===")
+        sec_per_cell = calibrate_straight_movement(self.pwm, calib["BASE_SPEED"])
+        
+        # Save updated calibration
+        calib["SEC_PER_CELL"] = sec_per_cell
+        save_calibration(calib)
+        
+        # Update local parameters
+        self.sec_per_cell = sec_per_cell
+        
+        print(f"Calibration complete! SEC_PER_CELL = {sec_per_cell:.3f}s")
+        
 
 if __name__ == '__main__':
     import argparse
@@ -629,6 +669,8 @@ if __name__ == '__main__':
     parser.add_argument('--sim', action='store_true', help='Run in simulation mode (no hardware)')
     parser.add_argument('--load', type=str, help='Load maze map from file')
     parser.add_argument('--steps', type=int, default=20, help='Number of exploration steps')
+    parser.add_argument('--calibrate', action='store_true', help='Run calibration procedure')
+    parser.add_argument('--exit', action='store_true', help='Go directly to exit after exploration')
     args = parser.parse_args()
     
     # Create maze solver
@@ -639,6 +681,11 @@ if __name__ == '__main__':
         print("Running in simulation mode")
         maze_solver.set_simulation_mode(True)
     
+    # Run calibration if requested
+    if args.calibrate:
+        maze_solver.calibrate()
+        exit(0)
+    
     # Load maze map if requested
     if args.load:
         maze_solver.load_maze_map(args.load)
@@ -648,6 +695,12 @@ if __name__ == '__main__':
         print("Starting maze exploration...")
         maze_solver.run_exploration(args.steps)
         print("Exploration finished.")
+        
+        # Go to exit if requested
+        if args.exit:
+            print(f"Navigating to exit at {EXIT_CELL}...")
+            maze_solver.run_to_target(EXIT_CELL)
+            print("Exit reached!")
 
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
