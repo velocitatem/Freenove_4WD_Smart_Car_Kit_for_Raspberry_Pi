@@ -35,7 +35,7 @@ class MazeSolver:
         self.BASE_SPEED = 2000
         self.TURN_SPEED = 2500
         self.TURN_DURATION_90 = 0.65  # Increased from 0.55 for more accurate turns
-        self.CELL_DURATION = 0.5  # seconds to travel one grid cell
+        self.CELL_DURATION = 0.2  # seconds to travel one grid cell
         
         # Maze solving variables
         self.grid_size = 20  # cm per grid cell
@@ -618,7 +618,13 @@ class MazeSolver:
 
 if __name__ == '__main__':
     import argparse
-    
+    try:
+        import RPi.GPIO as GPIO
+        HAS_GPIO = True
+    except (ImportError, RuntimeError):
+        print("RPi.GPIO not available. Assuming simulation or testing environment.")
+        HAS_GPIO = False
+
     parser = argparse.ArgumentParser(description='Maze Solver')
     parser.add_argument('--sim', action='store_true', help='Run in simulation mode (no hardware)')
     parser.add_argument('--load', type=str, help='Load maze map from file')
@@ -639,12 +645,33 @@ if __name__ == '__main__':
     
     try:
         # Run exploration
+        print("Starting maze exploration...")
         maze_solver.run_exploration(args.steps)
-        
-        # Save the map
-        maze_solver.save_maze_map('maze_map.json')
-        
+        print("Exploration finished.")
+
     except KeyboardInterrupt:
-        print("Interrupted by user")
-        # Save the map
+        print("\nInterrupted by user.")
+
+    finally:
+        print("Saving final maze map...")
+        # Save the map regardless of how we exit
         maze_solver.save_maze_map('maze_map.json')
+
+        # Cleanup hardware resources
+        if not args.sim and HAS_GPIO:
+            print("Stopping motors and cleaning up GPIO...")
+            try:
+                # Ensure motors are stopped first
+                maze_solver.pwm.set_motor_model(0, 0, 0, 0)
+                time.sleep(0.1) # Short pause
+                # Clean up all GPIO channels
+                GPIO.cleanup()
+                print("GPIO cleanup complete.")
+            except Exception as cleanup_error:
+                print(f"Error during GPIO cleanup: {cleanup_error}")
+        elif args.sim:
+            print("Simulation mode: No GPIO cleanup needed.")
+        else:
+            print("GPIO library not available: Skipping cleanup.")
+
+        print("Program terminated.")
