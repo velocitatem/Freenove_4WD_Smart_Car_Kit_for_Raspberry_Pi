@@ -215,10 +215,10 @@ class MazeSolver:
                 ir2_value = infrared.read_one_infrared(2)
                 ir3_value = infrared.read_one_infrared(3)
 
-                # If we're still following the line
-                if (ir1_value == 1 or ir2_value == 1 or ir3_value == 1) and not self.in_maze:
+                # If we're still following the line (middle sensor detects line)
+                if ir2_value == 1 and not self.in_maze:
                     if ir1_value != 1 and ir2_value == 1 and ir3_value != 1:
-                        # Middle sensor detects line - go straight
+                        # Only middle sensor detects line - go straight
                         self.set_motor_model(800, 800, 800, 800)
                     elif ir1_value != 1 and ir2_value != 1 and ir3_value == 1:
                         # Right sensor detects line - turn right
@@ -235,6 +235,10 @@ class MazeSolver:
                     elif ir1_value == 1 and ir2_value == 1 and ir3_value == 1:
                         # All sensors detect line - intersection
                         self.set_motor_model(800, 800, 800, 800)
+                elif not self.in_maze:
+                    # If we lose the line, try to find it by turning right
+                    self.set_motor_model(-1500, -1500, 1500, 1500)
+                    time.sleep(0.5)
                 else:
                     # We've entered the maze
                     self.in_maze = True
