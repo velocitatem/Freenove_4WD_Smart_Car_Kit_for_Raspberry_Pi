@@ -1,20 +1,13 @@
 import time
 from motor import *
-from gpiozero import LineSensor
+from infrared import Infrared
 from ultrasonic import Ultrasonic
 from buzzer import Buzzer
 from servo import Servo
 import math
 
-# Define sensor pins
-IR01 = 14
-IR02 = 15
-IR03 = 23
-
 # Initialize sensors
-IR01_sensor = LineSensor(IR01)
-IR02_sensor = LineSensor(IR02)
-IR03_sensor = LineSensor(IR03)
+infrared = Infrared()
 ultrasonic = Ultrasonic()
 buzzer = Buzzer()
 servo = Servo()
@@ -217,28 +210,30 @@ class MazeSolver:
                     time.sleep(0.5)
                     continue
 
-                # Read infrared sensors
-                LMR = 0x00
-                if IR01_sensor.value:
-                    LMR |= 4
-                if IR02_sensor.value:
-                    LMR |= 2
-                if IR03_sensor.value:
-                    LMR |= 1
+                # Read infrared sensors using the Infrared class
+                ir1_value = infrared.read_one_infrared(1)
+                ir2_value = infrared.read_one_infrared(2)
+                ir3_value = infrared.read_one_infrared(3)
 
                 # If we're still following the line
-                if LMR != 0 and not self.in_maze:
-                    if LMR == 2:
+                if (ir1_value == 1 or ir2_value == 1 or ir3_value == 1) and not self.in_maze:
+                    if ir1_value != 1 and ir2_value == 1 and ir3_value != 1:
+                        # Middle sensor detects line - go straight
                         self.set_motor_model(800, 800, 800, 800)
-                    elif LMR == 4:
+                    elif ir1_value != 1 and ir2_value != 1 and ir3_value == 1:
+                        # Right sensor detects line - turn right
                         self.set_motor_model(-1500, -1500, 2500, 2500)
-                    elif LMR == 6:
-                        self.set_motor_model(-2000, -2000, 4000, 4000)
-                    elif LMR == 1:
+                    elif ir1_value == 1 and ir2_value != 1 and ir3_value != 1:
+                        # Left sensor detects line - turn left
                         self.set_motor_model(2500, 2500, -1500, -1500)
-                    elif LMR == 3:
+                    elif ir1_value == 1 and ir2_value == 1 and ir3_value != 1:
+                        # Left and middle sensors detect line - sharp left turn
                         self.set_motor_model(4000, 4000, -2000, -2000)
-                    elif LMR == 7:
+                    elif ir1_value != 1 and ir2_value == 1 and ir3_value == 1:
+                        # Middle and right sensors detect line - sharp right turn
+                        self.set_motor_model(-2000, -2000, 4000, 4000)
+                    elif ir1_value == 1 and ir2_value == 1 and ir3_value == 1:
+                        # All sensors detect line - intersection
                         self.set_motor_model(800, 800, 800, 800)
                 else:
                     # We've entered the maze
@@ -283,6 +278,8 @@ class MazeSolver:
         except KeyboardInterrupt:
             # Reset servo to center position
             servo.set_servo_pwm('0', 90)
+            # Close the infrared sensor
+            infrared.close()
             self.set_motor_model(0, 0, 0, 0)
             self.pwm.close()
 
