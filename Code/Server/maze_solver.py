@@ -14,11 +14,18 @@ from enum import IntEnum
 from collections import deque
 import os
 from pathlib import Path
+import sys
+
+# Add parent directory to path for imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
 
 # Import new components
 from geometry import CELL_CM, COLS, ROWS, WALL_THICKCM, START_CELL, EXIT_CELL, DX, DY
 from calibration import load_calibration, save_calibration, calibrate_straight_movement
 from pose import Pose
+from maze_blueprint import create_competition_maze, blueprint_to_wall_grids, wall_grids_to_occupancy, blueprint_to_occupancy
 
 # Direction enum for consistent direction handling
 class Dir(IntEnum):
@@ -55,6 +62,11 @@ class MazeSolver:
         self.visited_cells = set()  # Set of visited cells
         self.path = []  # Current A* path
         self.target_position = None  # Target position for pathfinding
+        
+        # Wall grid representation (for advanced navigation)
+        self.h_walls = None  # Horizontal walls
+        self.v_walls = None  # Vertical walls
+        self.occupancy_grid = None  # Occupancy grid
         
         # Stuck detection
         self.last_positions = deque(maxlen=8)
@@ -267,6 +279,30 @@ class MazeSolver:
                 # Update the opposite wall in the adjacent cell
                 opposite_dir = (abs_dir + 2) % 4
                 self.maze_map[adj_pos][opposite_dir] = True
+        
+        # Update wall grid representation if available
+        if self.h_walls is not None and self.v_walls is not None:
+            self._update_wall_grids()
+    
+    def _update_wall_grids(self):
+        """Update the wall grid representation from the maze map"""
+        # For simplicity, just regenerate the wall grids
+        blueprint = [[0 for _ in range(COLS)] for _ in range(ROWS)]
+        
+        for (x, y), walls in self.maze_map.items():
+            if 0 <= x < COLS and 0 <= y < ROWS:
+                cell_code = 0
+                # Convert walls to bitmap
+                if walls[0]: cell_code |= 1  # North
+                if walls[1]: cell_code |= 2  # East
+                if walls[2]: cell_code |= 4  # South
+                if walls[3]: cell_code |= 8  # West
+                blueprint[y][x] = cell_code
+        
+        # Convert to wall grids
+        self.h_walls, self.v_walls = blueprint_to_wall_grids(blueprint)
+        # Update occupancy grid
+        self.occupancy_grid = wall_grids_to_occupancy(self.h_walls, self.v_walls)
     
     def a_star_pathfinding(self, start, goal):
         """Find a path from start to goal using A* algorithm"""
@@ -323,9 +359,97 @@ class MazeSolver:
                         open_set_hash.add(neighbor)
                         
         return []  # No path found
+    
+    def a_star_on_occupancy_grid(self, start, goal):
+        """A* pathfinding on the occupancy grid for more precise paths
+        
+        Args:
+            start: Start position in grid coordinates (x, y)
+            goal: Goal position in grid coordinates (x, y)
+            
+        Returns:
+            List of coordinates forming the path
+        """
+        if self.occupancy_grid is None:
+            print("Occupancy grid not available")
+            return self.a_star_pathfinding(start, goal)
+            
+        # Convert cell coordinates to occupancy grid coordinates (center points)
+        start_node = (start[1] * 2 + 1, start[0] * 2 + 1)  # (row, col) format
+        goal_node = (goal[1] * 2 + 1, goal[0] * 2 + 1)     # (row, col) format
+        
+        # Check if start or goal is a wall (shouldn't happen)
+        if self.occupancy_grid[start_node[0], start_node[1]] == 1:
+            print("Start position is inside a wall!")
+            return []
+            
+        if self.occupancy_grid[goal_node[0], goal_node[1]] == 1:
+            print("Goal position is inside a wall!")
+            return []
+            
+        # Set up A* search
+        open_set = PriorityQueue()
+        open_set.put((0, start_node))
+        came_from = {start_node: None}
+        g_score = {start_node: 0}
+        f_score = {start_node: self.heuristic_grid(start_node, goal_node)}
+        
+        grid_shape = self.occupancy_grid.shape
+        open_set_hash = {start_node}
+        
+        # Four-way connectivity (N, E, S, W)
+        directions = [(-1, 0), (0, 1), (1, 0), (0, -1)]
+        
+        while not open_set.empty():
+            current = open_set.get()[1]
+            open_set_hash.remove(current)
+            
+            if current == goal_node:
+                # Reconstruct path
+                path = []
+                while current:
+                    # Convert grid coordinates back to cell coordinates
+                    cell_coord = (current[1] // 2, current[0] // 2)
+                    if not path or cell_coord != path[-1]:  # Avoid duplicates
+                        path.append(cell_coord)
+                    current = came_from[current]
+                return path[::-1]  # Return reversed path
+                
+            # Explore neighbors
+            for dr, dc in directions:
+                nr, nc = current[0] + dr, current[1] + dc
+                
+                # Check bounds
+                if not (0 <= nr < grid_shape[0] and 0 <= nc < grid_shape[1]):
+                    continue
+                    
+                # Skip walls
+                if self.occupancy_grid[nr, nc] == 1:
+                    continue
+                    
+                neighbor = (nr, nc)
+                
+                # Calculate tentative g_score
+                tentative_g_score = g_score[current] + 1
+                
+                if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
+                    # This path is better
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g_score
+                    f_score[neighbor] = tentative_g_score + self.heuristic_grid(neighbor, goal_node)
+                    
+                    if neighbor not in open_set_hash:
+                        open_set.put((f_score[neighbor], neighbor))
+                        open_set_hash.add(neighbor)
+                        
+        return []  # No path found
                 
     def heuristic(self, a, b):
         """Manhattan distance heuristic for A*"""
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+    
+    def heuristic_grid(self, a, b):
+        """Manhattan distance heuristic for grid coordinates"""
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
     
     def get_next_exploration_target(self):
@@ -566,7 +690,14 @@ class MazeSolver:
     def run_to_target(self, target_position):
         """Run to a specific target position using A* pathfinding"""
         # Find path to target
-        path = self.a_star_pathfinding(self.pose.cell, target_position)
+        if self.occupancy_grid is not None:
+            # Use grid-based A* if available
+            print(f"Using occupancy grid A* to find path to {target_position}")
+            path = self.a_star_on_occupancy_grid(self.pose.cell, target_position)
+        else:
+            # Fall back to regular A*
+            print(f"Using regular A* to find path to {target_position}")
+            path = self.a_star_pathfinding(self.pose.cell, target_position)
         
         if not path:
             print(f"No path found to target {target_position}")
@@ -581,24 +712,31 @@ class MazeSolver:
         
         return True
     
-    def preload_maze(self, blueprint):
-        """Preload a known maze layout"""
+    def preload_maze(self, blueprint=None):
+        """Preload a known maze layout from a blueprint or the competition maze"""
+        if blueprint is None:
+            # Load the competition maze layout
+            blueprint = create_competition_maze()
+            
+        # Convert to wall grids
+        self.h_walls, self.v_walls = blueprint_to_wall_grids(blueprint)
+        self.occupancy_grid = wall_grids_to_occupancy(self.h_walls, self.v_walls)
+        
+        # Populate the maze_map from the blueprint
         for y in range(ROWS):
             for x in range(COLS):
                 code = blueprint[y][x]
-                
-                # Convert maze code to wall configuration
                 walls = [False] * 4
-                if code & 1:  # North wall
-                    walls[0] = True
-                if code & 2:  # East wall
-                    walls[1] = True
-                if code & 4:  # South wall
-                    walls[2] = True
-                if code & 8:  # West wall
-                    walls[3] = True
-                    
+                
+                # Convert bitmap to wall array
+                if code & 1: walls[0] = True  # North
+                if code & 2: walls[1] = True  # East
+                if code & 4: walls[2] = True  # South
+                if code & 8: walls[3] = True  # West
+                
                 self.maze_map[(x, y)] = walls
+        
+        print(f"Maze preloaded with {len(self.maze_map)} cells")
     
     def save_maze_map(self, filename):
         """Save the maze map to a JSON file"""
@@ -624,6 +762,9 @@ class MazeSolver:
             # Convert maze_map keys back to tuples
             self.maze_map = {eval(k): v for k, v in data["maze_map"].items()}
             self.visited_cells = set(map(tuple, data["visited_cells"]))
+            
+            # Regenerate the wall grids
+            self._update_wall_grids()
             
             print(f"Maze map loaded from {filename}")
             return True
@@ -671,6 +812,8 @@ if __name__ == '__main__':
     parser.add_argument('--steps', type=int, default=20, help='Number of exploration steps')
     parser.add_argument('--calibrate', action='store_true', help='Run calibration procedure')
     parser.add_argument('--exit', action='store_true', help='Go directly to exit after exploration')
+    parser.add_argument('--preload', action='store_true', help='Preload the competition maze')
+    
     args = parser.parse_args()
     
     # Create maze solver
@@ -686,21 +829,32 @@ if __name__ == '__main__':
         maze_solver.calibrate()
         exit(0)
     
+    # Preload maze if requested
+    if args.preload:
+        print("Preloading competition maze")
+        maze_solver.preload_maze()
+    
     # Load maze map if requested
-    if args.load:
+    elif args.load:
         maze_solver.load_maze_map(args.load)
     
     try:
-        # Run exploration
-        print("Starting maze exploration...")
-        maze_solver.run_exploration(args.steps)
-        print("Exploration finished.")
-        
-        # Go to exit if requested
-        if args.exit:
-            print(f"Navigating to exit at {EXIT_CELL}...")
+        # If we have a preloaded maze, just go to the exit
+        if args.preload or (args.load and args.exit):
+            print(f"Navigating directly to exit at {EXIT_CELL}...")
             maze_solver.run_to_target(EXIT_CELL)
             print("Exit reached!")
+        else:
+            # Run exploration
+            print("Starting maze exploration...")
+            maze_solver.run_exploration(args.steps)
+            print("Exploration finished.")
+            
+            # Go to exit if requested
+            if args.exit:
+                print(f"Navigating to exit at {EXIT_CELL}...")
+                maze_solver.run_to_target(EXIT_CELL)
+                print("Exit reached!")
 
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
