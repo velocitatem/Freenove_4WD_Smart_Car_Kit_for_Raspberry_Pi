@@ -230,23 +230,12 @@ class Car:
         if (time.time() - self.car_record_time) > 0.2:
             self.car_record_time = time.time()
             
-            # First check ultrasonic for obstacles
-            distance = self.sonic.get_distance()
-            if distance is not None and distance < 30:
-                # Stop the car
-                self.motor.set_motor_model(0, 0, 0, 0)
-                time.sleep(0.5)
-                # Turn right to find a new path
-                self.motor.set_motor_model(-1500, -1500, 1500, 1500)
-                time.sleep(0.5)
-                return
-            
             # Read infrared sensors
             ir_value = self.infrared.read_all_infrared()
             
-            # If we're still following the line
+            # If any line is detected
             if ir_value != 0:
-                # Use the proven line tracking logic
+                # Line following logic
                 if ir_value == 2:  # Only middle sensor detects line
                     self.motor.set_motor_model(800, 800, 800, 800)  # Go straight
                 elif ir_value == 4:  # Middle and right sensors detect line
@@ -257,56 +246,23 @@ class Car:
                     self.motor.set_motor_model(2500, 2500, -1500, -1500)  # Turn left
                 elif ir_value == 3:  # Left sensor detects line
                     self.motor.set_motor_model(4000, 4000, -2000, -2000)  # Sharp left
-                elif ir_value == 7:  # All sensors detect line (intersection)
-                    # At intersection, continue straight
-                    self.motor.set_motor_model(800, 800, 800, 800)
+                elif ir_value == 7:  # All sensors detect line
+                    self.motor.set_motor_model(800, 800, 800, 800)  # Go straight
             else:
-                # We've entered the maze, start maze solving
-                self.update_maze_map()
+                # No line detected - switch to obstacle avoidance mode
+                distance = self.sonic.get_distance()
                 
-                # If we don't have a path or need to recalculate
-                if not self.path:
-                    # Define goal position (this should be set based on maze layout)
-                    goal_position = (5, 5)  # Example goal
-                    self.path = self.a_star_search(self.current_position, goal_position)
-                
-                if self.path:
-                    next_pos = self.path[0]
-                    dx = next_pos[0] - self.current_position[0]
-                    dy = next_pos[1] - self.current_position[1]
-                    
-                    # Determine required turn
-                    required_direction = 0
-                    if dx == 1: required_direction = 1
-                    elif dx == -1: required_direction = 3
-                    elif dy == 1: required_direction = 0
-                    elif dy == -1: required_direction = 2
-                    
-                    # Turn if needed
-                    turn_diff = (required_direction - self.current_direction) % 4
-                    if turn_diff == 1:  # Turn right
+                if distance is not None:
+                    if distance < 30:  # Obstacle detected
+                        # Stop
+                        self.motor.set_motor_model(0, 0, 0, 0)
+                        time.sleep(0.1)
+                        # Turn right to avoid obstacle
                         self.motor.set_motor_model(-1500, -1500, 1500, 1500)
                         time.sleep(0.5)
-                    elif turn_diff == 3:  # Turn left
-                        self.motor.set_motor_model(1500, 1500, -1500, -1500)
-                        time.sleep(0.5)
-                    elif turn_diff == 2:  # Turn around
-                        self.motor.set_motor_model(-1500, -1500, 1500, 1500)
-                        time.sleep(1)
-                    
-                    self.current_direction = required_direction
-                    
-                    # Move forward
-                    self.motor.set_motor_model(800, 800, 800, 800)
-                    time.sleep(1)  # Move one grid cell
-                    
-                    # Update position
-                    self.current_position = next_pos
-                    self.path.pop(0)
-                else:
-                    # No path found, search for new path
-                    self.motor.set_motor_model(-1500, -1500, 1500, 1500)
-                    time.sleep(0.5)
+                    else:
+                        # No obstacle, continue forward
+                        self.motor.set_motor_model(800, 800, 800, 800)
 
 def test_car_sonic():
     car = Car()
