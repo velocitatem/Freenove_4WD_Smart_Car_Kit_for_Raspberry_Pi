@@ -82,28 +82,95 @@ class MazeSolver:
             return 2
         # if no clear path, move back
         return -1
-
+    
+    def move(self, direction: int, distance: int = 1):
+        """
+        Move the car in a specified direction for a given distance.
+        
+        Args:
+            direction: 0=straight, 1=right, 2=left, -1=back
+            distance: Number of grid cells to move (default=1)
+        """
+        # Base speeds for different movements
+        BASE_SPEED = 800
+        TURN_SPEED = 1500
+        SHARP_TURN_SPEED = 2000
+        MAX_TURN_SPEED = 4000
+        
+        # Movement duration based on distance
+        MOVE_DURATION = 0.5 * distance  # seconds per grid cell
+        TURN_DURATION = 0.5  # seconds for 90-degree turn
+        
+        try:
+            if direction == 0:  # Straight
+                # Use proven forward speed from car.py
+                PWM.set_motor_model(BASE_SPEED, BASE_SPEED, BASE_SPEED, BASE_SPEED)
+                time.sleep(MOVE_DURATION)
+                
+            elif direction == 1:  # Right
+                # Use proven right turn pattern from car.py
+                PWM.set_motor_model(-TURN_SPEED, -TURN_SPEED, TURN_SPEED, TURN_SPEED)
+                time.sleep(TURN_DURATION)
+                # Move forward after turn
+                PWM.set_motor_model(BASE_SPEED, BASE_SPEED, BASE_SPEED, BASE_SPEED)
+                time.sleep(MOVE_DURATION)
+                
+            elif direction == 2:  # Left
+                # Use proven left turn pattern from car.py
+                PWM.set_motor_model(TURN_SPEED, TURN_SPEED, -TURN_SPEED, -TURN_SPEED)
+                time.sleep(TURN_DURATION)
+                # Move forward after turn
+                PWM.set_motor_model(BASE_SPEED, BASE_SPEED, BASE_SPEED, BASE_SPEED)
+                time.sleep(MOVE_DURATION)
+                
+            elif direction == -1:  # Back
+                # Use proven backward pattern from car.py
+                PWM.set_motor_model(-BASE_SPEED, -BASE_SPEED, -BASE_SPEED, -BASE_SPEED)
+                time.sleep(MOVE_DURATION)
+                
+            # Stop the car after movement
+            PWM.set_motor_model(0, 0, 0, 0)
+            time.sleep(0.1)  # Small delay to ensure complete stop
+            
+        except Exception as e:
+            print(f"Error during movement: {e}")
+            # Ensure car stops if there's an error
+            PWM.set_motor_model(0, 0, 0, 0)
+            
     def run(self):
-
         # scan 
         scan_results = self.scan_environment()
         print(scan_results)
         direction = self.get_direction(scan_results)
         direction_strings = ['straight', 'right', 'left', 'back']
         print(direction_strings[direction])
-        MAG = 100
-        if direction == 0:
-            PWM.set_motor_model(MAG,MAG,MAG,MAG)
-        elif direction == 1:
-            PWM.set_motor_model(MAG,MAG,-MAG,-MAG)
-        elif direction == 2:
-            PWM.set_motor_model(-MAG,-MAG,MAG,MAG)
-        else:
-            PWM.set_motor_model(-MAG,-MAG,MAG,MAG)
-        time.sleep(10)
-        PWM.set_motor_model(0,0,0,0)
-
+        
+        # Move in the chosen direction
+        self.move(direction)
+        
         # update position
+        if direction == 0:  # straight
+            if self.current_direction == 0:  # north
+                self.current_position = (self.current_position[0], self.current_position[1] + 1)
+            elif self.current_direction == 1:  # east
+                self.current_position = (self.current_position[0] + 1, self.current_position[1])
+            elif self.current_direction == 2:  # south
+                self.current_position = (self.current_position[0], self.current_position[1] - 1)
+            else:  # west
+                self.current_position = (self.current_position[0] - 1, self.current_position[1])
+        elif direction == 1:  # right
+            self.current_direction = (self.current_direction + 1) % 4
+        elif direction == 2:  # left
+            self.current_direction = (self.current_direction - 1) % 4
+        elif direction == -1:  # back
+            if self.current_direction == 0:  # north
+                self.current_position = (self.current_position[0], self.current_position[1] - 1)
+            elif self.current_direction == 1:  # east
+                self.current_position = (self.current_position[0] - 1, self.current_position[1])
+            elif self.current_direction == 2:  # south
+                self.current_position = (self.current_position[0], self.current_position[1] + 1)
+            else:  # west
+                self.current_position = (self.current_position[0] + 1, self.current_position[1])
 
     def run_loop(self):
         while True:
