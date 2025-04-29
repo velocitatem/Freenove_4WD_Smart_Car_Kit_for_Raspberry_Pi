@@ -32,8 +32,8 @@ class MazeSolver:
         self.pwm = PWM
         
         # Constants for movement
-        self.BASE_SPEED = 800
-        self.TURN_SPEED = 1000
+        self.BASE_SPEED = 2000
+        self.TURN_SPEED = 2500
         self.TURN_DURATION_90 = 0.65  # Increased from 0.55 for more accurate turns
         self.CELL_DURATION = 0.5  # seconds to travel one grid cell
         
