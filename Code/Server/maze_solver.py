@@ -22,10 +22,11 @@ class MazeSolver:
         self.pwm = PCA9685(0x40, debug=True)
         self.pwm.set_pwm_freq(50)
         
-        # Movement parameters
-        self.base_speed = 500  # Base speed for line following (reduced from 800)
-        self.turn_speed = 1000  # Speed for turns (reduced from 1500)
-        self.sharp_turn_speed = 2000  # Speed for sharp turns (reduced from 4000)
+        # Movement parameters (using proven values from your code)
+        self.base_speed = 800  # Base speed for line following
+        self.turn_speed = 1500  # Speed for turns
+        self.sharp_turn_speed = 2000  # Speed for sharp turns
+        self.max_turn_speed = 4000  # Maximum turn speed
         
         # Maze solving variables
         self.grid_size = 20  # cm per grid cell
@@ -56,52 +57,56 @@ class MazeSolver:
             duty4 = -4095
         return duty1, duty2, duty3, duty4
 
-    def set_motor_model(self, duty1, duty2, duty3, duty4):
-        duty1, duty2, duty3, duty4 = self.duty_range(duty1, duty2, duty3, duty4)
-        
-        # Left upper wheel
-        if duty1 > 0:
+    def left_upper_wheel(self, duty):
+        if duty > 0:
             self.pwm.set_motor_pwm(0, 0)
-            self.pwm.set_motor_pwm(1, duty1)
-        elif duty1 < 0:
+            self.pwm.set_motor_pwm(1, duty)
+        elif duty < 0:
             self.pwm.set_motor_pwm(1, 0)
-            self.pwm.set_motor_pwm(0, abs(duty1))
+            self.pwm.set_motor_pwm(0, abs(duty))
         else:
             self.pwm.set_motor_pwm(0, 4095)
             self.pwm.set_motor_pwm(1, 4095)
-            
-        # Left lower wheel
-        if duty2 > 0:
+
+    def left_lower_wheel(self, duty):
+        if duty > 0:
             self.pwm.set_motor_pwm(3, 0)
-            self.pwm.set_motor_pwm(2, duty2)
-        elif duty2 < 0:
+            self.pwm.set_motor_pwm(2, duty)
+        elif duty < 0:
             self.pwm.set_motor_pwm(2, 0)
-            self.pwm.set_motor_pwm(3, abs(duty2))
+            self.pwm.set_motor_pwm(3, abs(duty))
         else:
             self.pwm.set_motor_pwm(2, 4095)
             self.pwm.set_motor_pwm(3, 4095)
-            
-        # Right upper wheel
-        if duty3 > 0:
+
+    def right_upper_wheel(self, duty):
+        if duty > 0:
             self.pwm.set_motor_pwm(6, 0)
-            self.pwm.set_motor_pwm(7, duty3)
-        elif duty3 < 0:
+            self.pwm.set_motor_pwm(7, duty)
+        elif duty < 0:
             self.pwm.set_motor_pwm(7, 0)
-            self.pwm.set_motor_pwm(6, abs(duty3))
+            self.pwm.set_motor_pwm(6, abs(duty))
         else:
             self.pwm.set_motor_pwm(6, 4095)
             self.pwm.set_motor_pwm(7, 4095)
-            
-        # Right lower wheel
-        if duty4 > 0:
+
+    def right_lower_wheel(self, duty):
+        if duty > 0:
             self.pwm.set_motor_pwm(4, 0)
-            self.pwm.set_motor_pwm(5, duty4)
-        elif duty4 < 0:
+            self.pwm.set_motor_pwm(5, duty)
+        elif duty < 0:
             self.pwm.set_motor_pwm(5, 0)
-            self.pwm.set_motor_pwm(4, abs(duty4))
+            self.pwm.set_motor_pwm(4, abs(duty))
         else:
             self.pwm.set_motor_pwm(4, 4095)
             self.pwm.set_motor_pwm(5, 4095)
+
+    def set_motor_model(self, duty1, duty2, duty3, duty4):
+        duty1, duty2, duty3, duty4 = self.duty_range(duty1, duty2, duty3, duty4)
+        self.left_upper_wheel(duty1)
+        self.left_lower_wheel(duty2)
+        self.right_upper_wheel(duty3)
+        self.right_lower_wheel(duty4)
 
     def manhattan_distance(self, pos1, pos2):
         return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
@@ -143,46 +148,54 @@ class MazeSolver:
         return None
 
     def follow_line(self):
-        """Follow the black line with slower, more precise movements"""
-        # Read infrared sensors
-        LMR = 0x00
-        if IR01_sensor.value:
-            LMR |= 4
-        if IR02_sensor.value:
-            LMR |= 2
-        if IR03_sensor.value:
-            LMR |= 1
+        """Follow the black line using the proven line following logic"""
+        # Check for obstacles first
+        d = ultrasonic.get_distance()
+        if d is not None and d <= 50:
+            buzzer.run('1')
+            time.sleep(0.2)
+            buzzer.run('0')
+            self.set_motor_model(0, 0, 0, 0)
+            time.sleep(0.5)
+            return
 
-        if LMR == 2:  # Only middle sensor detects line
+        # Read infrared sensors using your proven logic
+        self.LMR = 0x00
+        if IR01_sensor.value:
+            self.LMR = (self.LMR | 4)
+        if IR02_sensor.value:
+            self.LMR = (self.LMR | 2)
+        if IR03_sensor.value:
+            self.LMR = (self.LMR | 1)
+
+        # Use your proven motor control logic
+        if self.LMR == 2:  # Only middle sensor detects line
             self.set_motor_model(self.base_speed, self.base_speed, self.base_speed, self.base_speed)
-            self.line_lost_count = 0  # Reset lost count when we find the line
-        elif LMR == 4:  # Middle and right sensors detect line
+            self.line_lost_count = 0
+        elif self.LMR == 4:  # Middle and right sensors detect line
             self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
-            time.sleep(0.1)  # Shorter turn duration
-        elif LMR == 6:  # Right sensor detects line
-            self.set_motor_model(-self.sharp_turn_speed, -self.sharp_turn_speed, self.sharp_turn_speed, self.sharp_turn_speed)
-            time.sleep(0.1)
-        elif LMR == 1:  # Middle and left sensors detect line
+        elif self.LMR == 6:  # Right sensor detects line
+            self.set_motor_model(-self.sharp_turn_speed, -self.sharp_turn_speed, self.max_turn_speed, self.max_turn_speed)
+        elif self.LMR == 1:  # Middle and left sensors detect line
             self.set_motor_model(self.turn_speed, self.turn_speed, -self.turn_speed, -self.turn_speed)
-            time.sleep(0.1)
-        elif LMR == 3:  # Left sensor detects line
-            self.set_motor_model(self.sharp_turn_speed, self.sharp_turn_speed, -self.sharp_turn_speed, -self.sharp_turn_speed)
-            time.sleep(0.1)
-        elif LMR == 7:  # All sensors detect line (intersection)
-            self.set_motor_model(self.base_speed, self.base_speed, self.base_speed, self.base_speed)
-            time.sleep(0.2)  # Move through intersection
+        elif self.LMR == 3:  # Left sensor detects line
+            self.set_motor_model(self.max_turn_speed, self.max_turn_speed, -self.sharp_turn_speed, -self.sharp_turn_speed)
+        elif self.LMR == 7:  # All sensors detect line (intersection)
+            self.set_motor_model(0, 0, 0, 0)  # Stop at intersection
+            time.sleep(0.5)
+            self.in_maze = True  # Transition to maze solving
+            print("Transitioning to maze solving mode")
         else:  # No line detected
             self.line_lost_count += 1
             if self.line_lost_count < self.max_line_lost:
                 # Search for line by turning right
                 self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
-                time.sleep(0.1)
             else:
                 # Line lost for too long, transition to maze solving
                 self.in_maze = True
                 print("Transitioning to maze solving mode")
                 self.set_motor_model(0, 0, 0, 0)
-                time.sleep(1)  # Pause before starting maze solving
+                time.sleep(1)
 
     def update_maze_map(self):
         """Update the maze map based on ultrasonic sensor readings"""
@@ -271,7 +284,7 @@ class MazeSolver:
             
             # Move forward one grid cell
             self.set_motor_model(self.base_speed, self.base_speed, self.base_speed, self.base_speed)
-            time.sleep(0.8)  # Adjusted for slower speed
+            time.sleep(0.8)
             
             # Update position
             self.current_position = next_pos
