@@ -73,13 +73,14 @@ class MazeSolver:
     def get_direction(self, scan_results):
         """Determine the direction to move based on the scan results"""
         # see if we can go straight
-        if scan_results[95] > 10:
+        DISTANCE = 20
+        if scan_results[95] > DISTANCE:
             return 0
         # see if we can go right
-        if scan_results[135] > 10:
+        if scan_results[135] > DISTANCE:
             return 1
         # see if we can go left
-        if scan_results[55] > 10:
+        if scan_results[55] > DISTANCE:
             return 2
         # if no clear path, turn right
         return 1
@@ -101,15 +102,20 @@ class MazeSolver:
             PWM.set_motor_model(-MAG,-MAG,MAG,MAG)
         else:
             PWM.set_motor_model(-MAG,-MAG,MAG,MAG)
-        time.sleep(0.1)
+        time.sleep(1)
         PWM.set_motor_model(0,0,0,0)
 
         # update position
 
+    def run_loop(self):
+        while True:
+            self.run()
+
+
 
 if __name__ == '__main__':
     maze_solver = MazeSolver()
-    maze_solver.run()
+    maze_solver.run_loop()
 
 
 
