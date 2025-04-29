@@ -230,12 +230,23 @@ class Car:
         if (time.time() - self.car_record_time) > 0.2:
             self.car_record_time = time.time()
             
+            # First check ultrasonic for obstacles
+            distance = self.sonic.get_distance()
+            if distance is not None and distance < 30:
+                # Stop the car
+                self.motor.set_motor_model(0, 0, 0, 0)
+                time.sleep(0.5)
+                # Turn right to find a new path
+                self.motor.set_motor_model(-1500, -1500, 1500, 1500)
+                time.sleep(0.5)
+                return
+            
             # Read infrared sensors
             ir_value = self.infrared.read_all_infrared()
             
             # If we're still following the line
             if ir_value != 0:
-                # Line following logic
+                # Use the proven line tracking logic
                 if ir_value == 2:  # Only middle sensor detects line
                     self.motor.set_motor_model(800, 800, 800, 800)  # Go straight
                 elif ir_value == 4:  # Middle and right sensors detect line
