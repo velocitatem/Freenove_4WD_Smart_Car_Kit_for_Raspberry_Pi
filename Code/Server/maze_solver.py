@@ -10,6 +10,15 @@ from servo import Servo
 from motor import Ordinary_Car
 from queue import PriorityQueue
 import json
+from enum import IntEnum
+from collections import deque
+
+# Direction enum for consistent direction handling
+class Dir(IntEnum):
+    STRAIGHT = 0
+    LEFT = 1
+    RIGHT = 2
+    BACK = -1
 
 # Initialize sensors
 infrared = Infrared()
@@ -21,6 +30,15 @@ PWM = Ordinary_Car()
 class MazeSolver:
     def __init__(self):
         self.pwm = PWM
+        
+        # Constants for movement
+        self.BASE_SPEED = 800
+        self.TURN_SPEED = 1000
+        self.TURN_DURATION_90 = 0.55  # Calibrate for exact 90 degrees
+        self.TURN_DURATION_45 = self.TURN_DURATION_90 / 2
+        self.TURN_DURATION_180 = self.TURN_DURATION_90 * 2
+        self.CELL_DURATION = 0.5  # seconds to travel one grid cell
+        self.CLEAR_DISTANCE = 50  # cm threshold for obstacle detection
         
         # Maze solving variables
         self.grid_size = 20  # cm per grid cell
@@ -38,10 +56,8 @@ class MazeSolver:
         self.min_y = 0
         self.max_y = 0
         
-        # Line tracking variables
-        self.last_direction = None
-        self.stuck_counter = 0
-        self.max_stuck_count = 5
+        # Stuck detection
+        self.last_positions = deque(maxlen=8)
         
         # Servo scanning parameters
         self.scan_angles = [0, 90, 180]  # Servo angles to scan (left, front, right)
@@ -57,6 +73,14 @@ class MazeSolver:
     def set_simulation_mode(self, mode):
         """Set simulation mode (True for no hardware, False for hardware)"""
         self.simulation_mode = mode
+    
+    def median_distance(self):
+        """Get median distance reading, ignoring zeros"""
+        samples = [d for d in (ultrasonic.get_distance() for _ in range(5)) if d]
+        if not samples:
+            return 0  # treat as blocked
+        samples.sort()
+        return samples[len(samples)//2]
         
     def scan_environment(self):
         """Scan the environment using the servo-mounted ultrasonic sensor"""
@@ -64,7 +88,6 @@ class MazeSolver:
         
         if self.simulation_mode:
             # In simulation mode, generate fake scan results
-            # This is just a placeholder - real simulation would have a maze model
             self.scan_results = {
                 0: 50,   # Left
                 90: 30,  # Front
@@ -73,31 +96,17 @@ class MazeSolver:
             time.sleep(0.5)  # Simulate scan time
             return self.scan_results
             
-        # results format: {angle: distance}
-        SERVO_MOVE_TIME = 0.5
-        MEASUREMENT_COUNT = 3
+        # Move servo and take measurements at each angle
+        SERVO_MOVE_TIME = 0.25
         
         for angle in self.scan_angles:
             # Move servo to scan angle
             servo.set_servo_pwm('0', angle)
             time.sleep(SERVO_MOVE_TIME)  # Wait for servo to move
             
-            # Take multiple measurements and average them
-            measurements = []
-            for _ in range(MEASUREMENT_COUNT):  # Take 3 measurements
-                distance = ultrasonic.get_distance()
-                if distance is not None:
-                    measurements.append(distance)
-                    print(f"{angle}: {distance}")
-            
-            # Calculate average distance if we have measurements
-            if measurements:
-                average_distance = sum(measurements) / len(measurements)
-                # Store the result
-                self.scan_results[angle] = average_distance
-            else:
-                # Default value if no measurements
-                self.scan_results[angle] = 100  # Assume clear path
+            # Get median distance
+            self.scan_results[angle] = self.median_distance()
+            print(f"{angle}: {self.scan_results[angle]}")
             
         # Reset servo to center position
         servo.set_servo_pwm('0', 90)
@@ -105,17 +114,14 @@ class MazeSolver:
     
     def get_direction(self, scan_results):
         """Determine the direction to move based on the scan results"""
-        # see if we can go straight
+        # FIXED: Corrected direction mapping to match move() expectations
         if scan_results.get(90, 0) > self.wall_threshold:
-            return 0  # Straight
-        # see if we can go right
-        if scan_results.get(180, 0) > self.wall_threshold:
-            return 2  # Right
-        # see if we can go left
+            return Dir.STRAIGHT
         if scan_results.get(0, 0) > self.wall_threshold:
-            return 1  # Left
-        # if no clear path, move back
-        return -1  # Back
+            return Dir.LEFT      # LEFT is 1
+        if scan_results.get(180, 0) > self.wall_threshold:
+            return Dir.RIGHT     # RIGHT is 2
+        return Dir.BACK
     
     def update_maze_map(self):
         """Update the maze map based on the current position and scan results"""
@@ -251,86 +257,114 @@ class MazeSolver:
         
         return closest
     
-    def move(self, direction: int, distance: int = 1):
-        """
-        Move the car in a specified direction for a given distance.
-        
-        Args:
-            direction: 0=straight, 1=left, 2=right, -1=back
-            distance: Number of grid cells to move (default=1)
-        """
+    # Movement primitives
+    def go_straight(self, cells=1):
+        """Move straight ahead for the specified number of cells"""
         if self.simulation_mode:
-            # In simulation mode, just update the position without moving hardware
-            self._update_position_and_direction(direction)
-            time.sleep(0.5)  # Simulate movement time
+            self._update_position_after_straight()
+            time.sleep(self.CELL_DURATION * cells)  # Simulate movement time
             return
             
-        # Base speeds for different movements
-        BASE_SPEED = 800
-        TURN_SPEED = 1000  # Reduced for more precise turns
+        PWM.set_motor_model(self.BASE_SPEED, self.BASE_SPEED, 
+                            self.BASE_SPEED, self.BASE_SPEED)
+        time.sleep(self.CELL_DURATION * cells)
+        PWM.set_motor_model(0, 0, 0, 0)
         
-        TURN_DEGREE = 90  # Full 90 degree turns
-        # Movement duration based on distance
-        MOVE_DURATION = 0.5 * distance  # seconds per grid cell
-        TURN_DURATION = 0.5  # seconds for a 90 degree turn
+        # Update position
+        self._update_position_after_straight()
+        
+    def turn(self, left=True, degrees=90):
+        """Turn in place by the specified degrees"""
+        if self.simulation_mode:
+            if left:
+                self.current_direction = (self.current_direction - (degrees // 90)) % 4
+            else:
+                self.current_direction = (self.current_direction + (degrees // 90)) % 4
+            time.sleep(self.TURN_DURATION_90 * (degrees / 90))  # Simulate turning time
+            return
+            
+        # Determine turn duration based on degrees
+        if degrees == 45:
+            duration = self.TURN_DURATION_45
+        elif degrees == 90:
+            duration = self.TURN_DURATION_90
+        elif degrees == 180:
+            duration = self.TURN_DURATION_180
+        else:
+            duration = self.TURN_DURATION_90 * (degrees / 90)
+            
+        # Set motors based on turn direction
+        if left:
+            PWM.set_motor_model(-self.TURN_SPEED, -self.TURN_SPEED,
+                                self.TURN_SPEED, self.TURN_SPEED)
+            # Update direction
+            self.current_direction = (self.current_direction - (degrees // 90)) % 4
+        else:
+            PWM.set_motor_model(self.TURN_SPEED, self.TURN_SPEED,
+                                -self.TURN_SPEED, -self.TURN_SPEED)
+            # Update direction
+            self.current_direction = (self.current_direction + (degrees // 90)) % 4
+            
+        time.sleep(duration)
+        PWM.set_motor_model(0, 0, 0, 0)
+    
+    def move(self, direction):
+        """
+        Move the car in a specified direction.
+        
+        Args:
+            direction: Dir enum value (STRAIGHT, LEFT, RIGHT, BACK)
+        """
+        # Record position for stuck detection
+        self.last_positions.append(self.current_position)
+        
+        # Record current position as visited
+        self.visited_cells.add(self.current_position)
         
         try:
-            if direction == 0:  # Straight
-                # Use proven forward speed from car.py
-                PWM.set_motor_model(BASE_SPEED, BASE_SPEED, BASE_SPEED, BASE_SPEED)
-                time.sleep(MOVE_DURATION)
+            if direction is Dir.STRAIGHT:
+                self.go_straight()
                 
-            elif direction == 1:  # Left
-                # Use proven left turn pattern from car.py
-                PWM.set_motor_model(-TURN_SPEED, -TURN_SPEED, TURN_SPEED, TURN_SPEED)
-                time.sleep(TURN_DURATION)
+            elif direction is Dir.LEFT:
+                self.turn(left=True)
+                self.go_straight()
                 
-            elif direction == 2:  # Right
-                # Use proven right turn pattern from car.py
-                PWM.set_motor_model(TURN_SPEED, TURN_SPEED, -TURN_SPEED, -TURN_SPEED)
-                time.sleep(TURN_DURATION)
+            elif direction is Dir.RIGHT:
+                self.turn(left=False)
+                self.go_straight()
                 
-            elif direction == -1:  # Back
-                # For back, we'll make a 180-degree turn and then go forward
-                PWM.set_motor_model(TURN_SPEED, TURN_SPEED, -TURN_SPEED, -TURN_SPEED)
-                time.sleep(TURN_DURATION * 2)  # Double duration for 180 degrees
+            elif direction is Dir.BACK:
+                self.turn(left=True, degrees=180)
+                self.go_straight()
                 
-            # Stop the car after movement
-            PWM.set_motor_model(0, 0, 0, 0)
-            time.sleep(0.1)  # Small delay to ensure complete stop
-            
-            # Update position and direction in the maze
-            self._update_position_and_direction(direction)
-            
+            # Check if we're stuck
+            if len(self.last_positions) == 8 and len(set(self.last_positions)) <= 2:
+                self.recovery_spin()
+                
         except Exception as e:
             print(f"Error during movement: {e}")
             # Ensure car stops if there's an error
             PWM.set_motor_model(0, 0, 0, 0)
     
-    def _update_position_and_direction(self, direction):
-        """Update the position and direction based on the movement"""
-        # Record current position as visited
-        self.visited_cells.add(self.current_position)
-        
-        # Update direction
-        if direction == 1:  # Left
-            self.current_direction = (self.current_direction - 1) % 4
-        elif direction == 2:  # Right
-            self.current_direction = (self.current_direction + 1) % 4
-        elif direction == -1:  # Back (180 degree turn)
-            self.current_direction = (self.current_direction + 2) % 4
-            
-        # Update position if moving forward
-        if direction == 0:  # Straight ahead
-            x, y = self.current_position
-            if self.current_direction == 0:  # North
-                self.current_position = (x, y + 1)
-            elif self.current_direction == 1:  # East
-                self.current_position = (x + 1, y)
-            elif self.current_direction == 2:  # South
-                self.current_position = (x, y - 1)
-            elif self.current_direction == 3:  # West
-                self.current_position = (x - 1, y)
+    def recovery_spin(self):
+        """Recovery behavior when stuck in a loop"""
+        print("Detected stuck in a loop - performing recovery spin")
+        # Turn 90° right and rescan
+        self.turn(left=False)
+        # Clear stuck detection
+        self.last_positions.clear()
+    
+    def _update_position_after_straight(self):
+        """Update position after moving straight"""
+        x, y = self.current_position
+        if self.current_direction == 0:  # North
+            self.current_position = (x, y + 1)
+        elif self.current_direction == 1:  # East
+            self.current_position = (x + 1, y)
+        elif self.current_direction == 2:  # South
+            self.current_position = (x, y - 1)
+        elif self.current_direction == 3:  # West
+            self.current_position = (x - 1, y)
                 
         # Update maze boundaries
         x, y = self.current_position
@@ -366,20 +400,16 @@ class MazeSolver:
             
             # Convert turn to movement command
             if turn == 0:  # No turn needed
-                move_command = 0  # Go straight
+                move_command = Dir.STRAIGHT
             elif turn == 1:  # 90 degrees right
-                move_command = 2  # Turn right
+                move_command = Dir.RIGHT
             elif turn == 2:  # 180 degrees
-                move_command = -1  # Turn around
+                move_command = Dir.BACK
             elif turn == 3:  # 90 degrees left
-                move_command = 1  # Turn left
+                move_command = Dir.LEFT
                 
             # Execute movement
             self.move(move_command)
-            
-            # If we need to go forward after a turn
-            if turn != 0:
-                self.move(0)  # Go straight
     
     def run_step(self):
         """Run a single step of the maze solving algorithm"""
@@ -392,8 +422,13 @@ class MazeSolver:
         
         # Choose next direction based on simple algorithm
         direction = self.get_direction(scan_results)
-        direction_strings = ['straight', 'left', 'right', 'back']
-        print(f"Moving {direction_strings[direction if direction >= 0 else 3]}")
+        direction_strings = {
+            Dir.STRAIGHT: 'straight', 
+            Dir.LEFT: 'left', 
+            Dir.RIGHT: 'right', 
+            Dir.BACK: 'back'
+        }
+        print(f"Moving {direction_strings[direction]}")
         
         # Move in the chosen direction
         self.move(direction)
