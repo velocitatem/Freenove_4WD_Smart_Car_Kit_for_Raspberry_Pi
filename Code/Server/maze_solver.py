@@ -59,7 +59,8 @@ class MazeSolver:
         # Servo scanning parameters
         # self.scan_angles = [0, 90, 180]  # Old angles
         self.SCAN_ANGLES = [15, 45, 75, 90, 105, 135, 165] # New angles (7 points)
-        self.SERVO_MOVE_TIME = 0.15 # Reduced pause time for more scans
+        self.SERVO_MOVE_TIME = 0.5# Increased pause time for servo to settle
+        self.READING_PAUSE = 0.05 # Small pause after reading
         # Keep old angle names for reference in logic if needed, though direct angles used now
         self.ANG_LEFT_FAR = 15
         self.ANG_LEFT_MID = 45
@@ -118,6 +119,7 @@ class MazeSolver:
             # Get median distance
             distance = self.median_distance()
             self.scan_results[angle] = distance
+            time.sleep(self.READING_PAUSE) # Add pause after reading
             # print(f"Scan Angle {angle}: {distance:.1f} cm") # Optional debug print
 
         # Reset servo to center position after scan
