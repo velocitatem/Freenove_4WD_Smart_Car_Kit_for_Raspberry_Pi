@@ -6,9 +6,9 @@ from buzzer import Buzzer
 import math
 
 # Define sensor pins
-IR01 = 14
-IR02 = 15
-IR03 = 23
+IR01 = 14  # Left sensor
+IR02 = 15  # Middle sensor
+IR03 = 23  # Right sensor
 
 # Initialize sensors
 IR01_sensor = LineSensor(IR01)
@@ -22,6 +22,11 @@ class MazeSolver:
         self.pwm = PCA9685(0x40, debug=True)
         self.pwm.set_pwm_freq(50)
         
+        # Movement parameters
+        self.base_speed = 500  # Base speed for line following (reduced from 800)
+        self.turn_speed = 1000  # Speed for turns (reduced from 1500)
+        self.sharp_turn_speed = 2000  # Speed for sharp turns (reduced from 4000)
+        
         # Maze solving variables
         self.grid_size = 20  # cm per grid cell
         self.current_position = (0, 0)  # (x, y) in grid coordinates
@@ -29,6 +34,8 @@ class MazeSolver:
         self.maze_map = {}  # Stores discovered walls
         self.path = []  # Current A* path
         self.in_maze = False  # Whether we're in the maze or still following the line
+        self.line_lost_count = 0  # Count how many times we've lost the line
+        self.max_line_lost = 5  # Number of times to try finding line before entering maze mode
 
     def duty_range(self, duty1, duty2, duty3, duty4):
         if duty1 > 4095:
@@ -135,7 +142,50 @@ class MazeSolver:
 
         return None
 
+    def follow_line(self):
+        """Follow the black line with slower, more precise movements"""
+        # Read infrared sensors
+        LMR = 0x00
+        if IR01_sensor.value:
+            LMR |= 4
+        if IR02_sensor.value:
+            LMR |= 2
+        if IR03_sensor.value:
+            LMR |= 1
+
+        if LMR == 2:  # Only middle sensor detects line
+            self.set_motor_model(self.base_speed, self.base_speed, self.base_speed, self.base_speed)
+            self.line_lost_count = 0  # Reset lost count when we find the line
+        elif LMR == 4:  # Middle and right sensors detect line
+            self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
+            time.sleep(0.1)  # Shorter turn duration
+        elif LMR == 6:  # Right sensor detects line
+            self.set_motor_model(-self.sharp_turn_speed, -self.sharp_turn_speed, self.sharp_turn_speed, self.sharp_turn_speed)
+            time.sleep(0.1)
+        elif LMR == 1:  # Middle and left sensors detect line
+            self.set_motor_model(self.turn_speed, self.turn_speed, -self.turn_speed, -self.turn_speed)
+            time.sleep(0.1)
+        elif LMR == 3:  # Left sensor detects line
+            self.set_motor_model(self.sharp_turn_speed, self.sharp_turn_speed, -self.sharp_turn_speed, -self.sharp_turn_speed)
+            time.sleep(0.1)
+        elif LMR == 7:  # All sensors detect line (intersection)
+            self.set_motor_model(self.base_speed, self.base_speed, self.base_speed, self.base_speed)
+            time.sleep(0.2)  # Move through intersection
+        else:  # No line detected
+            self.line_lost_count += 1
+            if self.line_lost_count < self.max_line_lost:
+                # Search for line by turning right
+                self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
+                time.sleep(0.1)
+            else:
+                # Line lost for too long, transition to maze solving
+                self.in_maze = True
+                print("Transitioning to maze solving mode")
+                self.set_motor_model(0, 0, 0, 0)
+                time.sleep(1)  # Pause before starting maze solving
+
     def update_maze_map(self):
+        """Update the maze map based on ultrasonic sensor readings"""
         # Check left
         ultrasonic.trigger_pin = 27
         ultrasonic.echo_pin = 22
@@ -151,102 +201,100 @@ class MazeSolver:
         ultrasonic.echo_pin = 19
         right_dist = ultrasonic.get_distance()
         
+        # Update maze map with detected walls
         if left_dist is not None and left_dist < 30:
             wall_pos = (self.current_position[0] - 1, self.current_position[1])
             if self.current_position not in self.maze_map:
                 self.maze_map[self.current_position] = []
-            self.maze_map[self.current_position].append(wall_pos)
+            if wall_pos not in self.maze_map[self.current_position]:
+                self.maze_map[self.current_position].append(wall_pos)
             
         if front_dist is not None and front_dist < 30:
             wall_pos = (self.current_position[0], self.current_position[1] + 1)
             if self.current_position not in self.maze_map:
                 self.maze_map[self.current_position] = []
-            self.maze_map[self.current_position].append(wall_pos)
+            if wall_pos not in self.maze_map[self.current_position]:
+                self.maze_map[self.current_position].append(wall_pos)
             
         if right_dist is not None and right_dist < 30:
             wall_pos = (self.current_position[0] + 1, self.current_position[1])
             if self.current_position not in self.maze_map:
                 self.maze_map[self.current_position] = []
-            self.maze_map[self.current_position].append(wall_pos)
+            if wall_pos not in self.maze_map[self.current_position]:
+                self.maze_map[self.current_position].append(wall_pos)
+
+    def solve_maze(self):
+        """Navigate through the maze using A* algorithm"""
+        # First check for immediate obstacles
+        distance = ultrasonic.get_distance()
+        if distance is not None and distance < 30:
+            self.set_motor_model(0, 0, 0, 0)
+            buzzer.run('1')
+            time.sleep(0.2)
+            buzzer.run('0')
+            self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
+            time.sleep(0.5)
+            return
+
+        # Update maze map and find path
+        self.update_maze_map()
+        
+        if not self.path:
+            goal_position = (5, 5)  # Example goal position
+            self.path = self.a_star_search(self.current_position, goal_position)
+        
+        if self.path:
+            next_pos = self.path[0]
+            dx = next_pos[0] - self.current_position[0]
+            dy = next_pos[1] - self.current_position[1]
+            
+            # Determine required turn
+            required_direction = 0
+            if dx == 1: required_direction = 1
+            elif dx == -1: required_direction = 3
+            elif dy == 1: required_direction = 0
+            elif dy == -1: required_direction = 2
+            
+            # Execute turn if needed
+            turn_diff = (required_direction - self.current_direction) % 4
+            if turn_diff == 1:  # Turn right
+                self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
+                time.sleep(0.3)
+            elif turn_diff == 3:  # Turn left
+                self.set_motor_model(self.turn_speed, self.turn_speed, -self.turn_speed, -self.turn_speed)
+                time.sleep(0.3)
+            elif turn_diff == 2:  # Turn around
+                self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
+                time.sleep(0.6)
+            
+            self.current_direction = required_direction
+            
+            # Move forward one grid cell
+            self.set_motor_model(self.base_speed, self.base_speed, self.base_speed, self.base_speed)
+            time.sleep(0.8)  # Adjusted for slower speed
+            
+            # Update position
+            self.current_position = next_pos
+            self.path.pop(0)
+        else:
+            # No path found, turn right to search
+            self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
+            time.sleep(0.3)
 
     def run(self):
         try:
+            print("Starting maze solver...")
+            print("First following the line...")
+            
             while True:
-                # First check for obstacles
-                distance = ultrasonic.get_distance()
-                if distance is not None and distance < 30:
-                    self.set_motor_model(0, 0, 0, 0)
-                    buzzer.run('1')
-                    time.sleep(0.5)
-                    buzzer.run('0')
-                    self.set_motor_model(-1500, -1500, 1500, 1500)
-                    time.sleep(0.5)
-                    continue
-
-                # Read infrared sensors
-                LMR = 0x00
-                if IR01_sensor.value:
-                    LMR |= 4
-                if IR02_sensor.value:
-                    LMR |= 2
-                if IR03_sensor.value:
-                    LMR |= 1
-
-                # If we're still following the line
-                if LMR != 0 and not self.in_maze:
-                    if LMR == 2:
-                        self.set_motor_model(800, 800, 800, 800)
-                    elif LMR == 4:
-                        self.set_motor_model(-1500, -1500, 2500, 2500)
-                    elif LMR == 6:
-                        self.set_motor_model(-2000, -2000, 4000, 4000)
-                    elif LMR == 1:
-                        self.set_motor_model(2500, 2500, -1500, -1500)
-                    elif LMR == 3:
-                        self.set_motor_model(4000, 4000, -2000, -2000)
-                    elif LMR == 7:
-                        self.set_motor_model(800, 800, 800, 800)
+                if not self.in_maze:
+                    self.follow_line()
                 else:
-                    # We've entered the maze
-                    self.in_maze = True
-                    self.update_maze_map()
-                    
-                    if not self.path:
-                        goal_position = (5, 5)  # Example goal
-                        self.path = self.a_star_search(self.current_position, goal_position)
-                    
-                    if self.path:
-                        next_pos = self.path[0]
-                        dx = next_pos[0] - self.current_position[0]
-                        dy = next_pos[1] - self.current_position[1]
-                        
-                        required_direction = 0
-                        if dx == 1: required_direction = 1
-                        elif dx == -1: required_direction = 3
-                        elif dy == 1: required_direction = 0
-                        elif dy == -1: required_direction = 2
-                        
-                        turn_diff = (required_direction - self.current_direction) % 4
-                        if turn_diff == 1:
-                            self.set_motor_model(-1500, -1500, 1500, 1500)
-                            time.sleep(0.5)
-                        elif turn_diff == 3:
-                            self.set_motor_model(1500, 1500, -1500, -1500)
-                            time.sleep(0.5)
-                        elif turn_diff == 2:
-                            self.set_motor_model(-1500, -1500, 1500, 1500)
-                            time.sleep(1)
-                        
-                        self.current_direction = required_direction
-                        self.set_motor_model(800, 800, 800, 800)
-                        time.sleep(1)
-                        self.current_position = next_pos
-                        self.path.pop(0)
-                    else:
-                        self.set_motor_model(-1500, -1500, 1500, 1500)
-                        time.sleep(0.5)
+                    self.solve_maze()
+                time.sleep(0.05)  # Small delay to prevent overwhelming the system
 
         except KeyboardInterrupt:
+            print("\nStopping maze solver...")
             self.set_motor_model(0, 0, 0, 0)
             self.pwm.close()
 
