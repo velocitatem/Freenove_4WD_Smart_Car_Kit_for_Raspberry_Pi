@@ -73,15 +73,16 @@ class MazeSolver:
     def get_direction(self, scan_results):
         """Determine the direction to move based on the scan results"""
         # see if we can go straight
-        if scan_results[90] > 10:
+        if scan_results[95] > 10:
             return 0
         # see if we can go right
-        if scan_results[130] > 10:
+        if scan_results[135] > 10:
             return 1
         # see if we can go left
-        if scan_results[50] > 10:
+        if scan_results[55] > 10:
             return 2
-    
+        # if no clear path, turn right
+        return 1
 
     def run(self):
 
