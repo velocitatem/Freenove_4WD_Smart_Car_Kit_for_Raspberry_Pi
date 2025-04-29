@@ -179,6 +179,8 @@ class MazeSolver:
         time.sleep(0.3) # Allow time to reach start angle
 
         # Gradually move servo and take measurements
+        # order the angles in the order of left to right
+        self.SCAN_ANGLES.sort()
         for angle in self.SCAN_ANGLES:
             servo.set_servo_pwm('0', angle)
             time.sleep(self.SERVO_MOVE_TIME)  # Wait for servo to settle
