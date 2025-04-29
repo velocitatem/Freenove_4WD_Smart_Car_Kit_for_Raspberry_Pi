@@ -34,11 +34,10 @@ class MazeSolver:
         # Constants for movement
         self.BASE_SPEED = 800
         self.TURN_SPEED = 1000
-        self.TURN_DURATION_90 = 0.55  # Calibrate for exact 90 degrees
+        self.TURN_DURATION_90 = 0.65  # Increased from 0.55 for more accurate turns
         self.TURN_DURATION_45 = self.TURN_DURATION_90 / 2
         self.TURN_DURATION_180 = self.TURN_DURATION_90 * 2
         self.CELL_DURATION = 0.5  # seconds to travel one grid cell
-        self.CLEAR_DISTANCE = 50  # cm threshold for obstacle detection
         
         # Maze solving variables
         self.grid_size = 20  # cm per grid cell
@@ -61,11 +60,16 @@ class MazeSolver:
         
         # Servo scanning parameters
         self.scan_angles = [0, 90, 180]  # Servo angles to scan (left, front, right)
+        self.ANG_LEFT   = 0
+        self.ANG_FRONT  = 90
+        self.ANG_RIGHT  = 180
         self.scan_results = {}  # Store scan results
         self.observations = []
         
-        # Wall detection threshold
-        self.wall_threshold = 30  # cm
+        # Wall detection threshold - ADJUSTED
+        self.FRONT_CLEAR_CM = 45     # start the turn sooner
+        self.SIDE_CLEAR_CM  = 35     # sides may be slightly closer
+        self.MAP_WALL_THRESHOLD_CM = 30 # Threshold for marking walls in the map
         
         # For simulation mode (no hardware)
         self.simulation_mode = False
@@ -89,9 +93,9 @@ class MazeSolver:
         if self.simulation_mode:
             # In simulation mode, generate fake scan results
             self.scan_results = {
-                0: 50,   # Left
-                90: 30,  # Front
-                180: 40  # Right
+                self.ANG_LEFT: 50,
+                self.ANG_FRONT: 30,
+                self.ANG_RIGHT: 40
             }
             time.sleep(0.5)  # Simulate scan time
             return self.scan_results
@@ -99,7 +103,9 @@ class MazeSolver:
         # Move servo and take measurements at each angle
         SERVO_MOVE_TIME = 0.25
         
-        for angle in self.scan_angles:
+        # Use defined angles for consistency
+        angles_to_scan = [self.ANG_LEFT, self.ANG_FRONT, self.ANG_RIGHT]
+        for angle in angles_to_scan:
             # Move servo to scan angle
             servo.set_servo_pwm('0', angle)
             time.sleep(SERVO_MOVE_TIME)  # Wait for servo to move
@@ -107,20 +113,27 @@ class MazeSolver:
             # Get median distance
             self.scan_results[angle] = self.median_distance()
             print(f"{angle}: {self.scan_results[angle]}")
-            
+        
         # Reset servo to center position
-        servo.set_servo_pwm('0', 90)
+        servo.set_servo_pwm('0', self.ANG_FRONT) # Reset to front
         return self.scan_results
     
-    def get_direction(self, scan_results):
-        """Determine the direction to move based on the scan results"""
-        # FIXED: Corrected direction mapping to match move() expectations
-        if scan_results.get(90, 0) > self.wall_threshold:
+    def get_direction(self, scan):
+        """Decide where to go next given the latest scan."""
+        fwd   = scan.get(self.ANG_FRONT, 0)
+        left  = scan.get(self.ANG_LEFT, 0)
+        right = scan.get(self.ANG_RIGHT, 0)
+
+        # 1.  If the road ahead is comfortably clear, prefer it.
+        if fwd > self.FRONT_CLEAR_CM:
             return Dir.STRAIGHT
-        if scan_results.get(0, 0) > self.wall_threshold:
-            return Dir.LEFT      # LEFT is 1
-        if scan_results.get(180, 0) > self.wall_threshold:
-            return Dir.RIGHT     # RIGHT is 2
+
+        # 2.  Otherwise pick the wider side corridor.
+        #     (We only need room to *start* the turn, so SIDE_CLEAR_CM.)
+        if left > self.SIDE_CLEAR_CM or right > self.SIDE_CLEAR_CM:
+            return Dir.LEFT if left >= right else Dir.RIGHT
+
+        # 3.  No side looks inviting → bail out and backtrack.
         return Dir.BACK
     
     def update_maze_map(self):
@@ -144,14 +157,14 @@ class MazeSolver:
         # Update walls based on scan results and current direction
         # Wall presence is indicated by distance less than threshold
         for angle, distance in self.scan_results.items():
-            wall_present = distance < self.wall_threshold
+            wall_present = distance < self.MAP_WALL_THRESHOLD_CM
             
             # Convert servo angle to wall direction based on current orientation
-            if angle == 90:  # Front scan
+            if angle == self.ANG_FRONT:  # Front scan
                 wall_dir = self.current_direction
-            elif angle == 0:  # Left scan
+            elif angle == self.ANG_LEFT:  # Left scan
                 wall_dir = (self.current_direction - 1) % 4
-            elif angle == 180:  # Right scan
+            elif angle == self.ANG_RIGHT:  # Right scan
                 wall_dir = (self.current_direction + 1) % 4
             else:
                 continue  # Skip invalid angles
@@ -308,6 +321,18 @@ class MazeSolver:
         time.sleep(duration)
         PWM.set_motor_model(0, 0, 0, 0)
     
+    def safety_check(self):
+        """Perform a safety check to avoid collisions"""
+        # Quick scan directly in front to check if there's an obstacle
+        servo.set_servo_pwm('0', self.ANG_FRONT)  # Center the servo
+        time.sleep(0.2)  # Brief delay for servo to move
+        
+        distance = self.median_distance()
+        if distance < 15:  # Emergency stop if obstacle is very close
+            print(f"EMERGENCY STOP - Obstacle detected at {distance}cm")
+            return False
+        return True
+
     def move(self, direction):
         """
         Move the car in a specified direction.
@@ -322,20 +347,59 @@ class MazeSolver:
         self.visited_cells.add(self.current_position)
         
         try:
+            # Safety check before straight moves
+            if direction is Dir.STRAIGHT and not self.safety_check():
+                print("Safety check failed, choosing a different direction")
+                # Attempt to find a safe direction
+                left_safe = True
+                right_safe = True
+                
+                # Check left
+                servo.set_servo_pwm('0', self.ANG_LEFT)
+                time.sleep(0.2)
+                if self.median_distance() < 15:
+                    left_safe = False
+                
+                # Check right
+                servo.set_servo_pwm('0', self.ANG_RIGHT)
+                time.sleep(0.2)
+                if self.median_distance() < 15:
+                    right_safe = False
+                
+                # Reset servo position
+                servo.set_servo_pwm('0', self.ANG_FRONT)
+                
+                # Choose a safe direction
+                if left_safe:
+                    direction = Dir.LEFT
+                elif right_safe:
+                    direction = Dir.RIGHT
+                else:
+                    direction = Dir.BACK
+            
             if direction is Dir.STRAIGHT:
                 self.go_straight()
                 
             elif direction is Dir.LEFT:
                 self.turn(left=True)
-                self.go_straight()
+                if self.safety_check():
+                    self.go_straight()
+                else:
+                    print("Obstacle detected after turn, stopping")
                 
             elif direction is Dir.RIGHT:
                 self.turn(left=False)
-                self.go_straight()
+                if self.safety_check():
+                    self.go_straight()
+                else:
+                    print("Obstacle detected after turn, stopping")
                 
             elif direction is Dir.BACK:
                 self.turn(left=True, degrees=180)
-                self.go_straight()
+                if self.safety_check():
+                    self.go_straight()
+                else:
+                    print("Obstacle detected after turn, stopping")
                 
             # Check if we're stuck
             if len(self.last_positions) == 8 and len(set(self.last_positions)) <= 2:
@@ -415,24 +479,33 @@ class MazeSolver:
         """Run a single step of the maze solving algorithm"""
         # Scan the environment
         scan_results = self.scan_environment()
-        print("Scan results:", scan_results)
-        
+        #print("Scan results:", scan_results) # Original print
+
         # Update the maze map based on scan results
         self.update_maze_map()
-        
-        # Choose next direction based on simple algorithm
+
+        # Choose next direction based on new algorithm
         direction = self.get_direction(scan_results)
+
+        # Debug print for real-time insight
+        print(
+            f"Front {scan_results.get(self.ANG_FRONT, 0):>5.1f} cm |" 
+            f" Left {scan_results.get(self.ANG_LEFT, 0):>5.1f} cm |" 
+            f" Right {scan_results.get(self.ANG_RIGHT, 0):>5.1f} cm →" 
+            f" choice {direction.name}"
+        )
+
         direction_strings = {
-            Dir.STRAIGHT: 'straight', 
-            Dir.LEFT: 'left', 
-            Dir.RIGHT: 'right', 
+            Dir.STRAIGHT: 'straight',
+            Dir.LEFT: 'left',
+            Dir.RIGHT: 'right',
             Dir.BACK: 'back'
         }
-        print(f"Moving {direction_strings[direction]}")
-        
+        #print(f"Moving {direction_strings[direction]}") # Original print
+
         # Move in the chosen direction
         self.move(direction)
-        
+
         return direction
     
     def run_exploration(self, steps=10):
