@@ -31,7 +31,7 @@ class MazeSolver:
         self.max_stuck_count = 5
         
         # Servo scanning parameters
-        self.scan_angles = [0, 90, 130]  # Servo angles to scan
+        self.scan_angles = [0, 90, 180]  # Servo angles to scan
         self.scan_results = {}  # Store scan results
         self.current_scan_index = 0
 
@@ -60,7 +60,6 @@ class MazeSolver:
             self.scan_results[angle] = average_distance
             
             # Move servo to next angle
-            servo.set_servo_pwm('0', angle+ 15)
             time.sleep(0.2)  # Wait for servo to move
             
         # Reset servo to center position
@@ -76,7 +75,7 @@ class MazeSolver:
         if scan_results[90] > DISTANCE:
             return 0
         # see if we can go right
-        if scan_results[130] > DISTANCE:
+        if scan_results[180] > DISTANCE:
             return 1
         # see if we can go left
         if scan_results[0] > DISTANCE:
@@ -101,7 +100,7 @@ class MazeSolver:
             PWM.set_motor_model(-MAG,-MAG,MAG,MAG)
         else:
             PWM.set_motor_model(-MAG,-MAG,MAG,MAG)
-        time.sleep(1)
+        time.sleep(10)
         PWM.set_motor_model(0,0,0,0)
 
         # update position
