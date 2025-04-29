@@ -25,6 +25,11 @@ class MazeSolver:
         self.path = []  # Current A* path
         self.in_maze = False  # Whether we're in the maze or still following the line
         
+        # Line tracking variables
+        self.last_direction = None
+        self.stuck_counter = 0
+        self.max_stuck_count = 5
+        
         # Servo scanning parameters
         self.scan_angles = [50, 70, 90, 110, 130]  # Servo angles to scan
         self.scan_results = {}  # Store scan results
@@ -196,6 +201,39 @@ class MazeSolver:
                     self.maze_map[self.current_position] = []
                 self.maze_map[self.current_position].append(wall_pos)
 
+    def follow_line(self):
+        """Follow the line using infrared sensors"""
+        # Read infrared sensors
+        ir1_value = infrared.read_one_infrared(1)
+        ir2_value = infrared.read_one_infrared(2)
+        ir3_value = infrared.read_one_infrared(3)
+
+        # Line following logic
+        if ir2_value == 1:  # Middle sensor on line
+            self.set_motor_model(800, 800, 800, 800)
+            self.last_direction = 'forward'
+            self.stuck_counter = 0
+        elif ir1_value == 1:  # Left sensor on line
+            self.set_motor_model(2500, 2500, -1500, -1500)
+            self.last_direction = 'left'
+            self.stuck_counter = 0
+        elif ir3_value == 1:  # Right sensor on line
+            self.set_motor_model(-1500, -1500, 2500, 2500)
+            self.last_direction = 'right'
+            self.stuck_counter = 0
+        else:  # No sensors on line
+            self.stuck_counter += 1
+            if self.stuck_counter >= self.max_stuck_count:
+                # Try to find the line by turning
+                if self.last_direction == 'left':
+                    self.set_motor_model(2500, 2500, -1500, -1500)
+                else:
+                    self.set_motor_model(-1500, -1500, 2500, 2500)
+                time.sleep(0.5)
+                self.stuck_counter = 0
+            else:
+                self.set_motor_model(800, 800, 800, 800)
+
     def run(self):
         try:
             while True:
@@ -210,40 +248,19 @@ class MazeSolver:
                     time.sleep(0.5)
                     continue
 
-                # Read infrared sensors using the Infrared class
-                ir1_value = infrared.read_one_infrared(1)
-                ir2_value = infrared.read_one_infrared(2)
-                ir3_value = infrared.read_one_infrared(3)
-
-                # If we're still following the line (middle sensor detects line)
-                if ir2_value == 1 and not self.in_maze:
-                    if ir1_value != 1 and ir2_value == 1 and ir3_value != 1:
-                        # Only middle sensor detects line - go straight
-                        self.set_motor_model(800, 800, 800, 800)
-                    elif ir1_value != 1 and ir2_value != 1 and ir3_value == 1:
-                        # Right sensor detects line - turn right
-                        self.set_motor_model(-1500, -1500, 2500, 2500)
-                    elif ir1_value == 1 and ir2_value != 1 and ir3_value != 1:
-                        # Left sensor detects line - turn left
-                        self.set_motor_model(2500, 2500, -1500, -1500)
-                    elif ir1_value == 1 and ir2_value == 1 and ir3_value != 1:
-                        # Left and middle sensors detect line - sharp left turn
-                        self.set_motor_model(4000, 4000, -2000, -2000)
-                    elif ir1_value != 1 and ir2_value == 1 and ir3_value == 1:
-                        # Middle and right sensors detect line - sharp right turn
-                        self.set_motor_model(-2000, -2000, 4000, 4000)
-                    elif ir1_value == 1 and ir2_value == 1 and ir3_value == 1:
-                        # All sensors detect line - intersection
-                        self.set_motor_model(800, 800, 800, 800)
-                elif not self.in_maze:
-                    # If we lose the line, try to find it by turning right
-                    self.set_motor_model(-1500, -1500, 1500, 1500)
-                    time.sleep(0.5)
+                if not self.in_maze:
+                    # Follow line until we detect maze entrance
+                    self.follow_line()
+                    
+                    # Check if we've entered the maze (all sensors detect line)
+                    ir1_value = infrared.read_one_infrared(1)
+                    ir2_value = infrared.read_one_infrared(2)
+                    ir3_value = infrared.read_one_infrared(3)
+                    if ir1_value == 1 and ir2_value == 1 and ir3_value == 1:
+                        self.in_maze = True
+                        self.update_maze_map()
                 else:
-                    # We've entered the maze
-                    self.in_maze = True
-                    self.update_maze_map()
-
+                    # We're in the maze, use A* path planning
                     if not self.path:
                         goal_position = (5, 5)  # Example goal
                         self.path = self.a_star_search(self.current_position, goal_position)
@@ -275,9 +292,15 @@ class MazeSolver:
                         time.sleep(1)
                         self.current_position = next_pos
                         self.path.pop(0)
+                        
+                        # Update maze map after moving
+                        self.update_maze_map()
                     else:
+                        # No path found, try to find a way out
                         self.set_motor_model(-1500, -1500, 1500, 1500)
                         time.sleep(0.5)
+
+                time.sleep(0.1)
 
         except KeyboardInterrupt:
             # Reset servo to center position
