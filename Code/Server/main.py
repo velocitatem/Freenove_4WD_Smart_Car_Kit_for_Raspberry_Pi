@@ -251,6 +251,9 @@ class mywindow(QMainWindow, Ui_server_ui):
                         elif self.cmd_parse.int_parameter[0] == 3:
                             self.car_mode = 4
                             print("Car Mode: Ultrasonic Car")
+                        elif self.cmd_parse.int_parameter[0] == 5:
+                            self.car_mode = 5
+                            print("Car Mode: Advanced Line Follower")
                     
             if self.queue_cmd.empty():
                 time.sleep(0.001)
@@ -283,6 +286,10 @@ class mywindow(QMainWindow, Ui_server_ui):
             elif self.car_mode == 4:
                 self.car.mode_ultrasonic()
                 self.send_sonic_data()
+            elif self.car_mode == 5:
+                self.car.mode_advanced_line_follower()
+                self.send_sonic_data()
+                self.send_line_data()
             time.sleep(0.01)
 
 
