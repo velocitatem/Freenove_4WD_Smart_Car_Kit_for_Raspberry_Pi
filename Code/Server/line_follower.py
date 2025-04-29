@@ -62,6 +62,16 @@ class Ordinary_Car:
         else:
             self.pwm.set_motor_pwm(4,4095)
             self.pwm.set_motor_pwm(5,4095)
+    def right_lower_wheel(self,duty):
+        if duty>0:
+            self.pwm.set_motor_pwm(4,0)
+            self.pwm.set_motor_pwm(5,duty)
+        elif duty<0:
+            self.pwm.set_motor_pwm(5,0)
+            self.pwm.set_motor_pwm(4,abs(duty))
+        else:
+            self.pwm.set_motor_pwm(4,4095)
+            self.pwm.set_motor_pwm(5,4095)
     def set_motor_model(self, duty1, duty2, duty3, duty4):
         duty1,duty2,duty3,duty4=self.duty_range(duty1,duty2,duty3,duty4)
         self.left_upper_wheel(duty1)
