@@ -91,28 +91,19 @@ class MazeSolver:
         direction = self.get_direction(scan_results)
         direction_strings = ['straight', 'right', 'left']
         print(direction_strings[direction])
+        MAG = 100
         if direction == 0:
-            PWM.set_motor_model(1000,1000,1000,1000)
+            PWM.set_motor_model(MAG,MAG,MAG,MAG)
         elif direction == 1:
-            PWM.set_motor_model(1000,1000,-1000,-1000)
+            PWM.set_motor_model(MAG,MAG,-MAG,-MAG)
         elif direction == 2:
-            PWM.set_motor_model(-1000,-1000,1000,1000)
+            PWM.set_motor_model(-MAG,-MAG,MAG,MAG)
         else:
-            PWM.set_motor_model(0,0,0,0)
+            PWM.set_motor_model(-MAG,-MAG,MAG,MAG)
         time.sleep(0.1)
+        PWM.set_motor_model(0,0,0,0)
 
         # update position
-        if direction == 0:
-            self.current_position = (self.current_position[0], self.current_position[1] + move_distance_cm)
-        elif direction == 1:
-            self.current_position = (self.current_position[0] + move_distance_cm, self.current_position[1])
-        elif direction == 2:
-            self.current_position = (self.current_position[0] - move_distance_cm, self.current_position[1])
-        else:
-            self.current_position = (self.current_position[0], self.current_position[1] - move_distance_cm)
-
-        # update maze map
-        self.maze_map[self.current_position] = direction
 
 
 if __name__ == '__main__':
