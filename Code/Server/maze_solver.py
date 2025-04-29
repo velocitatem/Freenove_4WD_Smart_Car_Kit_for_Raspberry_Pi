@@ -51,50 +51,12 @@ class MazeSolver:
         # Wall detection threshold
         self.wall_threshold = 30  # cm
         
-        # Threading lock for GUI communication
-        self.lock = threading.Lock()
-        
-        # GUI communication variables
-        self.gui_data = {
-            "position": self.current_position,
-            "direction": self.current_direction,
-            "maze_map": self.maze_map,
-            "scan_results": self.scan_results,
-            "path": self.path
-        }
-        
-        # GUI update flag
-        self.gui_update_needed = threading.Event()
-        
         # For simulation mode (no hardware)
         self.simulation_mode = False
         
     def set_simulation_mode(self, mode):
         """Set simulation mode (True for no hardware, False for hardware)"""
         self.simulation_mode = mode
-        
-    def update_gui_data(self):
-        """Update the GUI data dictionary"""
-        with self.lock:
-            self.gui_data = {
-                "position": self.current_position,
-                "direction": self.current_direction,
-                "maze_map": self.maze_map,
-                "scan_results": self.scan_results,
-                "path": self.path,
-                "min_x": self.min_x,
-                "max_x": self.max_x,
-                "min_y": self.min_y,
-                "max_y": self.max_y,
-                "visited_cells": list(self.visited_cells)
-            }
-            self.gui_update_needed.set()
-        
-    def get_gui_data(self):
-        """Get the current GUI data"""
-        with self.lock:
-            data = self.gui_data.copy()
-        return data
         
     def scan_environment(self):
         """Scan the environment using the servo-mounted ultrasonic sensor"""
@@ -418,9 +380,6 @@ class MazeSolver:
             # If we need to go forward after a turn
             if turn != 0:
                 self.move(0)  # Go straight
-                
-            # Update GUI after each movement
-            self.update_gui_data()
     
     def run_step(self):
         """Run a single step of the maze solving algorithm"""
@@ -438,9 +397,6 @@ class MazeSolver:
         
         # Move in the chosen direction
         self.move(direction)
-        
-        # Update GUI data
-        self.update_gui_data()
         
         return direction
     
@@ -502,7 +458,6 @@ class MazeSolver:
             self.max_y = data["max_y"]
             
             print(f"Maze map loaded from {filename}")
-            self.update_gui_data()
             return True
         except Exception as e:
             print(f"Error loading maze map: {e}")
@@ -510,7 +465,6 @@ class MazeSolver:
 
 
 if __name__ == '__main__':
-    from maze_gui import MazeGUI
     import argparse
     
     parser = argparse.ArgumentParser(description='Maze Solver')
@@ -527,12 +481,6 @@ if __name__ == '__main__':
         print("Running in simulation mode")
         maze_solver.set_simulation_mode(True)
     
-    # Create and start GUI in a separate thread
-    gui = MazeGUI(maze_solver)
-    gui_thread = threading.Thread(target=gui.run)
-    gui_thread.daemon = True
-    gui_thread.start()
-    
     # Load maze map if requested
     if args.load:
         maze_solver.load_maze_map(args.load)
@@ -544,13 +492,7 @@ if __name__ == '__main__':
         # Save the map
         maze_solver.save_maze_map('maze_map.json')
         
-        # Wait for GUI to close
-        gui_thread.join()
-        
     except KeyboardInterrupt:
         print("Interrupted by user")
         # Save the map
         maze_solver.save_maze_map('maze_map.json')
-
-
-
