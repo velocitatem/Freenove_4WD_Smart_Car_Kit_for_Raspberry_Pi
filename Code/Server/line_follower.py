@@ -16,6 +16,8 @@ IR03 = 23  # Right sensor
 print(f"Setting up GPIO pins: Left={IR01}, Center={IR02}, Right={IR03}")
 
 # Initialize GPIO
+GPIO.setwarnings(False)
+GPIO.cleanup()
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(IR01, GPIO.IN)
 GPIO.setup(IR02, GPIO.IN)

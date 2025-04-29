@@ -196,31 +196,34 @@ class MazeSolver:
         return self.scan_results
     
     def get_direction(self, scan):
-        """Decide where to go next based on multi-point scan results."""
-        # Check front first
+        """Decide where to go next based on multi-point scan results with improved obstacle avoidance."""
+        # Danger threshold (cm)
+        DANGER_CM = 10
+        # Check front clearance
         fwd_dist = scan.get(self.ANG_FRONT, 0)
-        if fwd_dist > self.FRONT_CLEAR_CM:
+        if fwd_dist > self.FRONT_CLEAR_CM and fwd_dist > DANGER_CM:
             return Dir.STRAIGHT
 
-        # Get max distances for left and right sectors
+        # Read all left and right distances
         left_readings = [scan.get(a, 0) for a in self.SCAN_ANGLES if a < self.ANG_FRONT]
         right_readings = [scan.get(a, 0) for a in self.SCAN_ANGLES if a > self.ANG_FRONT]
 
-        max_left = max(left_readings) if left_readings else 0
-        max_right = max(right_readings) if right_readings else 0
+        # Block a side if any reading is dangerously close
+        left_blocked = any(d < DANGER_CM for d in left_readings)
+        right_blocked = any(d < DANGER_CM for d in right_readings)
 
-        # Check if either side is clear enough
-        left_clear = max_left > self.SIDE_CLEAR_CM
-        right_clear = max_right > self.SIDE_CLEAR_CM
+        # Compute average clearance
+        avg_left = sum(left_readings) / len(left_readings) if left_readings else 0
+        avg_right = sum(right_readings) / len(right_readings) if right_readings else 0
 
-        if left_clear or right_clear:
-            # Prefer the side with more clearance
-            if max_left >= max_right:
-                return Dir.LEFT
-            else:
-                return Dir.RIGHT
-
-        # If neither front nor sides are clear, go back
+        # Decide direction: prefer the side with more average clearance
+        if not left_blocked and not right_blocked:
+            return Dir.LEFT if avg_left >= avg_right else Dir.RIGHT
+        elif not left_blocked:
+            return Dir.LEFT
+        elif not right_blocked:
+            return Dir.RIGHT
+        # All sides blocked: go back
         return Dir.BACK
     
     def update_maze_map(self):
@@ -476,18 +479,34 @@ class MazeSolver:
             self.pose.update_after_straight(cells)
             time.sleep(self.sec_per_cell * cells)  # Simulate movement time
             return
-            
-        # Calculate movement time based on calibration
+
+        # Calculate total movement time for this many cells
         run_time = self.sec_per_cell * cells
-        
-        # Move forward at calibrated speed
-        self.pwm.set_motor_model(self.BASE_SPEED, self.BASE_SPEED, 
+        # Threshold to avoid collisions (cm)
+        COLLISION_THRESHOLD_CM = self.MAP_WALL_THRESHOLD_CM
+        # Start moving forward
+        self.pwm.set_motor_model(self.BASE_SPEED, self.BASE_SPEED,
                                  self.BASE_SPEED, self.BASE_SPEED)
-        time.sleep(run_time)
-        self.pwm.set_motor_model(0, 0, 0, 0)  # Stop
-        
-        # Update position
+        start_time = time.time()
+        # Periodically check forward distance to avoid collisions
+        while time.time() - start_time < run_time:
+            time.sleep(0.05)
+            if not self.simulation_mode:
+                dist = ultrasonic.get_distance()
+                if dist and dist < COLLISION_THRESHOLD_CM:
+                    print(f"Collision avoided during go_straight: {dist:.1f}cm < {COLLISION_THRESHOLD_CM:.1f}cm")
+                    # Stop immediately
+                    self.pwm.set_motor_model(0, 0, 0, 0)
+                    return
+        # Completed move without collision
+        self.pwm.set_motor_model(0, 0, 0, 0)
+        # Update position after full cell move
         self.pose.update_after_straight(cells)
+        # Re-align after move to correct drift
+        try:
+            self.align_to_walls()
+        except Exception as e:
+            print(f"Alignment after move failed: {e}")
         
     def turn(self, left=True):
         """Turn 90 degrees in place"""
@@ -530,6 +549,19 @@ class MazeSolver:
         Args:
             direction: Dir enum value (STRAIGHT, LEFT, RIGHT, BACK)
         """
+        # Emergency backoff if obstacle is too close
+        servo.set_servo_pwm('0', self.ANG_FRONT)
+        time.sleep(0.1)
+        if self.median_distance() < 8:
+            print("EMERGENCY BACKOFF - Obstacle too close!")
+            # Back up
+            self.pwm.set_motor_model(-self.BASE_SPEED, -self.BASE_SPEED,
+                                     -self.BASE_SPEED, -self.BASE_SPEED)
+            time.sleep(0.3)
+            self.pwm.set_motor_model(0, 0, 0, 0)
+            # Turn to avoid
+            self.turn(left=True)
+            return
         # Record position for stuck detection
         self.last_positions.append(self.pose.cell)
         
@@ -662,8 +694,17 @@ class MazeSolver:
         # Update the maze map based on scan results
         self.update_maze_map()
 
+        # Dead-end detection: if must go back and there's unexplored cells, backtrack via A*
+        dir_try = self.get_direction(scan_results)
+        if dir_try is Dir.BACK:
+            target = self.get_next_exploration_target()
+            if target is not None:
+                print(f"Dead-end at {self.pose.cell}, backtracking to {target}")
+                self.run_to_target(target)
+                return Dir.BACK
+
         # Choose next direction based on scan results
-        direction = self.get_direction(scan_results)
+        direction = dir_try
 
         # Debug print for real-time insight
         scan = scan_results
@@ -820,6 +861,9 @@ if __name__ == '__main__':
     
     # Create maze solver
     maze_solver = MazeSolver()
+    # make it so that the servo is assumed it is facing front 90 degrees, I will remove and adjust it
+    # at every momenet
+
     
     # Set simulation mode if requested
     if args.sim:
