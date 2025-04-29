@@ -503,7 +503,7 @@ class MazeSolver:
                                     -self.TURN_SPEED, -self.TURN_SPEED)
 
         # Wait for turn duration
-        time.sleep(self.TURN_DURATION_90)
+        time.sleep(self.TURN_DURATION_90 * 0.8 if left else self.TURN_DURATION_90 * 1.2)
         self.pwm.set_motor_model(0, 0, 0, 0)  # Stop
         
         # Update pose heading
