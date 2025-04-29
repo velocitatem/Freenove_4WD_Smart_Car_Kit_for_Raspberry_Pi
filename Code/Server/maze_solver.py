@@ -39,16 +39,17 @@ class MazeSolver:
         """Scan the environment using the servo-mounted ultrasonic sensor"""
         self.scan_results = {}  # Clear previous results
         # results format: {angle: distance}
-
+        SERVO_MOVE_TIME = 0.5
+        MEASUREMENT_COUNT = 3
         
         for angle in self.scan_angles:
             # Move servo to scan angle
             servo.set_servo_pwm('0', angle)
-            time.sleep(0.5)  # Wait for servo to move
+            time.sleep(SERVO_MOVE_TIME)  # Wait for servo to move
             
             # Take multiple measurements and average them
             measurements = []
-            for _ in range(3):  # Take 3 measurements
+            for _ in range(MEASUREMENT_COUNT):  # Take 3 measurements
                 distance = ultrasonic.get_distance()
                 if distance is not None:
                     measurements.append(distance)
@@ -60,12 +61,9 @@ class MazeSolver:
             # Store the result
             self.scan_results[angle] = average_distance
             
-            # Move servo to next angle
-            time.sleep(0.5)  # Wait for servo to move
             
         # Reset servo to center position
         servo.set_servo_pwm('0', 90)
-        time.sleep(0.2)
 
         return self.scan_results
     
@@ -98,10 +96,10 @@ class MazeSolver:
         SHARP_TURN_SPEED = 1500
         MAX_TURN_SPEED = 2000
         
+        TURN_DEGREE = 45
         # Movement duration based on distance
         MOVE_DURATION = 0.5 * distance  # seconds per grid cell
-        TURN_DURATION = 0.125  # seconds for 22.5-degree turn (0.5s / 4)
-        
+        TURN_DURATION = TURN_DEGREE / 90 * 0.5
         try:
             if direction == 0:  # Straight
                 # Use proven forward speed from car.py
