@@ -125,9 +125,9 @@ class MazeSolver:
         # Check for obstacles first
         d = ultrasonic.get_distance()
         if d is not None and d <= 50:
-            buzzer.run('1')
+            buzzer.set_state(1)  # Turn buzzer on
             time.sleep(0.2)
-            buzzer.run('0')
+            buzzer.set_state(0)  # Turn buzzer off
             self.set_motor_model(0, 0, 0, 0)
             time.sleep(0.5)
             return
@@ -160,17 +160,31 @@ class MazeSolver:
 
     def scan_ultrasonic(self):
         """Scan the ultrasonic sensor across a 90-degree field"""
+        self.scan_results = {}  # Clear previous results
+        
         # Configure ultrasonic sensor for scanning
         ultrasonic.trigger_pin = 5
         ultrasonic.echo_pin = 6
         
         # Scan at each position
         for angle in self.scan_positions:
-            # Simulate turning the sensor (in reality, you might need to physically turn it)
-            print(f"Scanning at {angle} degrees")
-            distance = ultrasonic.get_distance()
-            if distance is not None:
-                self.scan_results[angle] = distance
+            # Turn the car to face the scan angle
+            self.turn_to_angle(angle)
+            time.sleep(0.2)  # Wait for turn to complete
+            
+            # Take multiple measurements and average them
+            measurements = []
+            for _ in range(3):  # Take 3 measurements
+                distance = ultrasonic.get_distance()
+                if distance is not None:
+                    measurements.append(distance)
+                time.sleep(0.1)
+            
+            if measurements:
+                avg_distance = sum(measurements) / len(measurements)
+                self.scan_results[angle] = avg_distance
+                print(f"Scan at {angle}°: {avg_distance:.1f}cm")
+            
             time.sleep(0.1)  # Small delay between scans
 
     def find_best_direction(self):
@@ -182,7 +196,7 @@ class MazeSolver:
         best_angle = max(self.scan_results, key=self.scan_results.get)
         best_distance = self.scan_results[best_angle]
         
-        print(f"Best direction: {best_angle} degrees with {best_distance}cm")
+        print(f"Best direction: {best_angle}° with {best_distance:.1f}cm")
         return best_angle, best_distance
 
     def turn_to_angle(self, target_angle):
@@ -206,26 +220,30 @@ class MazeSolver:
         distance = ultrasonic.get_distance()
         if distance is not None and distance < 30:
             self.set_motor_model(0, 0, 0, 0)
-            buzzer.run('1')
+            buzzer.set_state(1)  # Turn buzzer on
             time.sleep(0.2)
-            buzzer.run('0')
+            buzzer.set_state(0)  # Turn buzzer off
             time.sleep(0.5)
             
+            print("Obstacle detected, scanning environment...")
             # Scan for best direction
             self.scan_ultrasonic()
             best_angle, best_distance = self.find_best_direction()
             
             if best_angle is not None:
                 # Turn to face the best direction
+                print(f"Turning to {best_angle}°")
                 self.turn_to_angle(best_angle)
                 time.sleep(0.5)
                 
                 # Move forward if there's enough space
                 if best_distance > 30:
+                    print(f"Moving forward {best_distance:.1f}cm")
                     self.set_motor_model(self.base_speed, self.base_speed, self.base_speed, self.base_speed)
                     time.sleep(1.0)
             else:
                 # No good direction found, turn right
+                print("No clear path found, turning right")
                 self.set_motor_model(-self.turn_speed, -self.turn_speed, self.turn_speed, self.turn_speed)
                 time.sleep(0.5)
         else:
